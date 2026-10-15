@@ -1,7 +1,23 @@
 {
   "name": "paseo-chat-polish",
-  "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Paseo plugin: a quieter chat timeline, merged steps, rich text styles, themes and a dashboard with live preview",
+  "keywords": [
+    "paseo",
+    "paseo-plugin",
+    "theme",
+    "chat"
+  ],
+  "license": "MIT",
+  "author": "Hieu Le",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lthieu96/paseo-chat-polish.git"
+  },
+  "homepage": "https://github.com/lthieu96/paseo-chat-polish#readme",
+  "bugs": {
+    "url": "https://github.com/lthieu96/paseo-chat-polish/issues"
+  },
   "files": [
     "paseo-plugin.json",
     "index.client.tsx",

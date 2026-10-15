@@ -2,7 +2,7 @@
 
 A [Paseo](https://paseo.sh) plugin that redraws the agent chat as one quiet column, adds the One Dark Darker Mariana theme, and gives you a dashboard to tune it all with a live preview.
 
-![The dashboard's Theme page](docs/screenshots/theme.png)
+![The dashboard's Theme page](images/theme.png)
 
 ## What it does
 
@@ -13,7 +13,7 @@ A [Paseo](https://paseo.sh) plugin that redraws the agent chat as one quiet colu
 - **Working indicator.** Paseo's dots, or a sparkle, spokes, dot ring, orb, matrix or snake loader.
 - **Extras.** Turn recaps, ⌥⌘↑/↓ to jump between your prompts, and Command Center (⌘K) toggles.
 
-![Merged steps, a diff and a shell run in the chat](docs/screenshots/chat.png)
+![Merged steps, a diff and a shell run in the chat](images/chat.png)
 
 ## Dashboard
 
@@ -21,21 +21,28 @@ Open **Chat Polish** in the sidebar. Every page has a live preview, and changes 
 
 | Messages | Rich text |
 | --- | --- |
-| ![Messages page with loader tiles](docs/screenshots/messages.png) | ![Rich text page with style tiles](docs/screenshots/rich-text.png) |
+| ![Messages page with loader tiles](images/messages.png) | ![Rich text page with style tiles](images/rich-text.png) |
 
 The Theme page previews code too. The Code tab draws the same rows the chat uses:
 
-<img src="docs/screenshots/code-preview.png" alt="Code preview" width="520">
+<img src="images/code-preview.png" alt="Code preview" width="520">
 
 ## Install
 
 Requires Paseo 0.11.2 or later.
 
 ```sh
-paseo plugin install https://github.com/lthieu96/paseo-chat-polish
+paseo plugin install paseo-chat-polish
 ```
 
-Restyling Paseo's own items, fonts and the app theme picker work on desktop and web.
+Or straight from GitHub: `paseo plugin install https://github.com/lthieu96/paseo-chat-polish`.
+
+## Limitations
+
+- Restyling Paseo's own items, the font settings and the app theme picker work on desktop and web only.
+- Fonts, theme picks and the restyle write Paseo's own settings and DOM, which aren't a public API and may change.
+- Previews of Paseo's built-in themes and font stacks are copied from Paseo 0.11.2 and can drift in later versions.
+- Plain tool rows need Settings → Appearance → Tool call display set to Detailed; Summary keeps Paseo's grouped calls.
 
 ## Develop
 
@@ -48,3 +55,7 @@ paseo plugin reload paseo-chat-polish
 ```
 
 Designs live in `design/dashboard.pen` (open it with [pen.dev](https://pen.dev)).
+
+## License
+
+MIT

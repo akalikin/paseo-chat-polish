@@ -1,0 +1,302 @@
+import type { AgentTimelineItem, ToolCallDetail } from "@getpaseo/protocol/agent-types";
+import { z } from "zod";
+import type { Hideable } from "../shared/timeline";
+
+type Item<T extends AgentTimelineItem["type"]> = Extract<AgentTimelineItem, { type: T }>;
+type Phase = "streaming" | "complete";
+
+const MAX_LINES = 200;
+const MAX_CHARS = 8000;
+
+const tone = z.enum(["muted", "success", "danger", "warning", "accent"]);
+
+const listItem = z.object({ icon: z.string().optional(), text: z.string(), tone: tone.optional(), shell: z.boolean().optional() });
+
+const detail = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("output"), command: z.string().optional(), cwd: z.string().optional(), text: z.string() }),
+  z.object({ kind: z.literal("diff"), lines: z.array(z.object({ text: z.string(), sign: z.enum([" ", "+", "-"]), n: z.number().optional() })) }),
+  z.object({ kind: z.literal("list"), items: z.array(listItem) }),
+  z.object({ kind: z.literal("text"), text: z.string() }),
+  z.object({ kind: z.literal("io"), input: z.string(), output: z.string() }),
+]);
+
+export const toolSchema = z.object({
+  status: z.enum(["running", "completed", "failed", "canceled"]),
+  icon: z.string(),
+  verb: z.string(),
+  target: z.string().optional(),
+  /** The target is a shell command line, colored as one. */
+  shell: z.boolean().optional(),
+  mono: z.boolean(),
+  meta: z.string().optional(),
+  metaTone: tone.optional(),
+  error: z.string().optional(),
+  detail: detail.optional(),
+});
+export type ToolData = z.output<typeof toolSchema>;
+export type Tone = z.output<typeof tone>;
+
+export const planSchema = z.object({ text: z.string(), phase: z.enum(["streaming", "complete"]) });
+export const thoughtSchema = z.object({ text: z.string(), phase: z.enum(["streaming", "complete"]) });
+export const todoSchema = z.object({
+  items: z.array(z.object({ text: z.string(), status: z.enum(["pending", "in_progress", "completed"]) })),
+});
+export const noticeSchema = z.object({
+  variant: z.enum(["inline", "divider"]),
+  tone,
+  icon: z.string(),
+  text: z.string(),
+  pulsing: z.boolean(),
+});
+
+const clipLines = (text: string) => {
+  const lines = text.replace(/\s+$/, "").split("\n");
+  const kept = lines.length > MAX_LINES ? [`… ${lines.length - MAX_LINES} earlier lines`, ...lines.slice(-MAX_LINES)] : lines;
+  const joined = kept.join("\n");
+  return joined.length > MAX_CHARS ? "…" + joined.slice(-MAX_CHARS) : joined;
+};
+
+export function shortPath(path: string) {
+  const parts = path.split("/").filter(Boolean);
+  return parts.length > 3 ? "…/" + parts.slice(-3).join("/") : path;
+}
+
+const firstLine = (s: string) => s.trim().split("\n")[0] ?? "";
+const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+const pascal = (s: string) => s.replace(/(^|[_-])(\w)/g, (_, __, c: string) => c.toUpperCase());
+const stringify = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v, null, 2) ?? "");
+
+/** The text inside a provider error: `message`, tool-result `content` (string or text blocks), else compact JSON. */
+export function errorBody(error: unknown): string | undefined {
+  if (error == null) return undefined;
+  if (typeof error === "string") return error;
+  const e = error as { message?: unknown; content?: unknown; error?: unknown };
+  if (typeof e.message === "string") return e.message;
+  if (typeof e.content === "string") return e.content;
+  if (Array.isArray(e.content)) {
+    const text = e.content.map((b) => (b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string" ? (b as { text: string }).text : "")).join("\n");
+    if (text.trim()) return text;
+  }
+  if (typeof e.error === "string") return e.error;
+  return JSON.stringify(error);
+}
+
+/** One readable line from a provider error. */
+export function errorText(error: unknown) {
+  const line = errorBody(error)?.trim().split("\n").find((l) => l.trim())?.trim() ?? "";
+  return line.length > 300 ? line.slice(0, 299) + "…" : line || undefined;
+}
+
+type DiffLine = { sign: " " | "+" | "-"; text: string; n?: number };
+
+/** Diff rows with the new-file line number (old-file number for deletions) taken from `@@` hunk headers. */
+export function diffLines(d: Extract<ToolCallDetail, { type: "edit" }>): DiffLine[] {
+  if (!d.unifiedDiff) {
+    const lines = (s: string | undefined, sign: "+" | "-") => (s ? s.split("\n").map((text) => ({ sign, text })) : []);
+    return [...lines(d.oldString, "-"), ...lines(d.newString, "+")];
+  }
+  const out: DiffLine[] = [];
+  let oldNo = 0;
+  let newNo = 0;
+  for (const l of d.unifiedDiff.split("\n")) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(l);
+    if (hunk) {
+      oldNo = Number(hunk[1]);
+      newNo = Number(hunk[2]);
+      continue;
+    }
+    if (l.startsWith("+++") || l.startsWith("---") || l.startsWith("\\")) continue;
+    const sign = l[0] === "+" || l[0] === "-" ? l[0] : " ";
+    const n = sign === "-" ? oldNo++ : sign === "+" ? newNo++ : (oldNo++, newNo++);
+    out.push({ sign, text: l.slice(1), n: n || undefined });
+  }
+  return out;
+}
+
+const tense = (running: boolean, now: string, past: string) => (running ? now : past);
+
+function describe(d: ToolCallDetail, name: string, running: boolean): Omit<ToolData, "status" | "error"> {
+  switch (d.type) {
+    case "shell":
+      return {
+        icon: "SquareTerminal",
+        verb: tense(running, "Running", "Ran"),
+        target: firstLine(d.command),
+        shell: true,
+        mono: true,
+        meta: d.exitCode ? `exit ${d.exitCode}` : undefined,
+        metaTone: d.exitCode ? "danger" : undefined,
+        detail: { kind: "output", command: d.command, cwd: d.cwd, text: clipLines(d.output ?? "") },
+      };
+    case "read":
+      return {
+        icon: "Eye",
+        verb: tense(running, "Reading", "Read"),
+        target: shortPath(d.filePath),
+        mono: true,
+        meta: d.offset != null && d.limit != null ? `L${d.offset}–${d.offset + d.limit}` : undefined,
+      };
+    case "edit": {
+      const lines = diffLines(d);
+      const add = lines.filter((l) => l.sign === "+").length;
+      const del = lines.filter((l) => l.sign === "-").length;
+      return {
+        icon: "Pencil",
+        verb: tense(running, "Editing", "Edited"),
+        target: shortPath(d.filePath),
+        mono: true,
+        meta: lines.length ? `+${add} −${del}` : undefined,
+        detail: lines.length ? { kind: "diff", lines: lines.slice(0, MAX_LINES) } : undefined,
+      };
+    }
+    case "write":
+      return {
+        icon: "FilePlus",
+        verb: tense(running, "Writing", "Wrote"),
+        target: shortPath(d.filePath),
+        mono: true,
+        meta: d.content ? `+${d.content.split("\n").length}` : undefined,
+        metaTone: "success",
+      };
+    case "search": {
+      const web = d.toolName === "web_search";
+      const items = web
+        ? (d.webResults ?? []).map((r) => ({ text: `${r.title} — ${r.url.replace(/^https?:\/\//, "")}` }))
+        : (d.filePaths ?? []).map((p) => ({ text: shortPath(p) }));
+      const meta = web
+        ? d.webResults && plural(d.webResults.length, "result")
+        : [d.numMatches != null && plural(d.numMatches, "match", "matches"), d.numFiles != null && plural(d.numFiles, "file")]
+            .filter(Boolean)
+            .join(" · ") || undefined;
+      return {
+        icon: web ? "Globe" : "Search",
+        verb: tense(running, web ? "Searching web" : "Searching", web ? "Searched web" : "Searched"),
+        target: d.query,
+        mono: !web,
+        meta: meta || undefined,
+        detail: items.length ? { kind: "list", items: items.slice(0, 50) } : undefined,
+      };
+    }
+    case "fetch":
+      return {
+        icon: "Globe",
+        verb: tense(running, "Fetching", "Fetched"),
+        target: d.url.replace(/^https?:\/\//, ""),
+        mono: true,
+        meta: [d.code, d.bytes != null && `${Math.max(1, Math.round(d.bytes / 1024))} KB`].filter(Boolean).join(" · ") || undefined,
+        detail: d.result ? { kind: "text", text: clipLines(d.result) } : undefined,
+      };
+    case "worktree_setup": {
+      const done = d.commands.filter((c) => c.status === "completed").length;
+      return {
+        icon: "GitBranch",
+        verb: tense(running, "Setting up worktree", "Set up worktree"),
+        target: d.branchName,
+        mono: true,
+        meta: `${done} / ${d.commands.length}`,
+        detail: {
+          kind: "list",
+          items: d.commands.map((c) => ({
+            icon: c.status === "completed" ? "Check" : c.status === "failed" ? "X" : "LoaderCircle",
+            tone: c.status === "completed" ? "success" : c.status === "failed" ? "danger" : "accent",
+            text: c.command,
+            shell: true,
+          })),
+        },
+      };
+    }
+    case "sub_agent": {
+      const kind = d.subAgentType ? d.subAgentType[0]!.toUpperCase() + d.subAgentType.slice(1) : "Sub";
+      const actions = d.actions ?? [];
+      return {
+        icon: "Bot",
+        verb: `${kind} agent`,
+        target: d.description,
+        mono: false,
+        meta: actions.length ? plural(actions.length, "action") : undefined,
+        detail: actions.length
+          ? { kind: "list", items: actions.slice(-20).map((a) => ({ text: a.summary ? `${a.toolName} ${a.summary}` : a.toolName })) }
+          : d.log
+            ? { kind: "text", text: clipLines(d.log) }
+            : undefined,
+      };
+    }
+    case "plain_text":
+      return {
+        icon: d.icon ? pascal(d.icon) : "Wrench",
+        verb: d.label ?? name,
+        mono: false,
+        detail: d.text ? { kind: "text", text: clipLines(d.text) } : undefined,
+      };
+    case "plan":
+    case "unknown":
+      return {
+        icon: "Wrench",
+        verb: tense(running, "Calling", "Called"),
+        target: name,
+        mono: true,
+        detail:
+          d.type === "unknown" && (d.input != null || d.output != null)
+            ? { kind: "io", input: clipLines(stringify(d.input)), output: clipLines(stringify(d.output)) }
+            : undefined,
+      };
+  }
+}
+
+export function toolData(item: Item<"tool_call">): ToolData {
+  // Claude background-task completions: the label is the task summary, the text is raw XML.
+  const base =
+    item.name === "task_notification" && item.detail.type === "plain_text"
+      ? { icon: "Bell", verb: "Background task", target: item.detail.label, mono: false }
+      : describe(item.detail, item.name, item.status === "running");
+  if (item.status === "canceled") return { ...base, status: "canceled", icon: "CircleSlash", verb: "Canceled", meta: undefined };
+  if (item.status === "failed") {
+    const body = errorBody(item.error) ?? "";
+    // Claude reports shell failures as "Exit code N" followed by the output: show it as exit N + output.
+    const exit = item.detail.type === "shell" ? /^Exit code (\d+)\s*([\s\S]*)$/.exec(body.trim()) : null;
+    if (exit && base.detail?.kind === "output") {
+      const detail = base.detail.text ? base.detail : { ...base.detail, text: clipLines(exit[2] ?? "") };
+      return { ...base, status: "failed", meta: `exit ${exit[1]}`, metaTone: "danger", detail };
+    }
+    return { ...base, status: "failed", meta: base.meta ?? "failed", metaTone: "danger", error: errorText(item.error) };
+  }
+  return { ...base, status: item.status };
+}
+
+/** Which "Show in timeline" switch covers a tool call; running and failed calls are never hidden. */
+export function hideableKind(item: Item<"tool_call">): Hideable | undefined {
+  if (item.status !== "completed") return undefined;
+  if (item.name === "task_notification") return "task";
+  const t = item.detail.type;
+  return t === "read" || t === "search" || t === "fetch" ? t : undefined;
+}
+
+export function todoData(item: Item<"todo">) {
+  return {
+    items: item.items.map((t) => {
+      const status = t.status ?? (t.completed ? "completed" : "pending");
+      return { status, text: status === "in_progress" && t.activeForm ? t.activeForm : t.text };
+    }),
+  };
+}
+
+export function noticeData(item: Item<"error"> | Item<"compaction">) {
+  if (item.type === "error") return { variant: "inline", tone: "danger", icon: "CircleAlert", text: item.message, pulsing: false } as const;
+  if (item.status === "loading") return { variant: "divider", tone: "muted", icon: "Minimize2", text: "Compacting context…", pulsing: true } as const;
+  const how = item.trigger === "manual" ? "manually" : "automatically";
+  const tokens = item.preTokens ? ` · ${Math.round(item.preTokens / 1000)}K tokens` : "";
+  return { variant: "divider", tone: "muted", icon: "Minimize2", text: `Context ${how} compacted${tokens}`, pulsing: false } as const;
+}
+
+export type { Phase };
+
+const IMAGE_MD = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
+
+export const imagesSchema = z.object({ images: z.array(z.object({ alt: z.string(), url: z.string() })) });
+
+/** Images of an assistant message that is nothing but image markdown; mixed messages stay native. */
+export function imageData(text: string) {
+  if (text.replace(IMAGE_MD, "").trim()) return undefined;
+  const images = [...text.matchAll(IMAGE_MD)].map((m) => ({ alt: m[1] || "Image", url: m[2]! }));
+  return images.length ? { images } : undefined;
+}

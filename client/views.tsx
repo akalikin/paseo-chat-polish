@@ -21,6 +21,12 @@ type Colors = PluginTheme["colors"];
 // Paseo's own fallback stack when Settings → Appearance → Code font is empty.
 const MONO = Platform.select({ ios: "Menlo", android: "monospace", default: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" });
 const ICON_SLOT = 20;
+
+/**
+ * Spread on every Text in the mono font. Paseo sets its UI font on all text not inside `data-pmono`, through an
+ * `#root` selector that outranks the font family in our styles, so without it code renders in the UI font.
+ */
+export const PMONO = { dataSet: { pmono: "" } } as object;
 const INDENT = 28;
 // Paseo puts 16pt between timeline items; rows are 26pt tall, so 6pt less gives the design's 36pt pitch. It comes off the top:
 // a reply block before a row keeps 12pt of bottom padding, so rows sat 12pt nearer the text below than the text above.
@@ -85,8 +91,12 @@ function makeStyles(c: Colors, a: HostAppearance) {
   });
 }
 
+/** Lets the dashboard preview fonts and sizes before they are applied to Paseo. */
+export const AppearanceOverride = createContext<Partial<HostAppearance> | undefined>(undefined);
+
 export function useStyles(theme: PluginTheme) {
-  return useMemo(() => makeStyles(theme.colors, readHostAppearance()), [theme]);
+  const override = useContext(AppearanceOverride);
+  return useMemo(() => makeStyles(theme.colors, { ...readHostAppearance(), ...override }), [theme, override]);
 }
 
 const NATIVE_DRIVER = Platform.OS !== "web";
@@ -272,6 +282,7 @@ function Row(p: RowProps) {
           <Text
             numberOfLines={1}
             ellipsizeMode="middle"
+            {...(p.mono ? PMONO : null)}
             style={[s.target, p.mono && s.mono, hovered && { color: c.foreground }, p.struck && { textDecorationLine: "line-through" }]}
           >
             {p.shell && (p.open || commandColors === "always") && syntax ? colored(highlightShell(p.target), syntax) : p.target}
@@ -312,10 +323,10 @@ function colored(spans: Span[], colors: SyntaxColors) {
 }
 
 /** One line of code (or a shell command) in the chosen highlight theme. */
-function CodeLine({ text, theme, style, shell }: { text: string; theme: PluginTheme; style: StyleProp<TextStyle>; shell?: boolean }) {
+export function CodeLine({ text, theme, style, shell }: { text: string; theme: PluginTheme; style: StyleProp<TextStyle>; shell?: boolean }) {
   const colors = useSyntax(theme);
   return (
-    <Text selectable style={style}>
+    <Text {...PMONO} selectable style={style}>
       {colors ? colored(shell ? highlightShellBlock(text) : highlight(text), colors) : text}
     </Text>
   );
@@ -338,14 +349,14 @@ function ToolDetail({ data, theme }: { data: NonNullable<ToolData["detail"]>; th
         <View style={s.block}>
           {data.command ? (
             <View style={s.blockHead}>
-              <Text style={[s.code, { color: c.foregroundMuted, fontSize: s.code.fontSize + 0.5 }]}>$</Text>
+              <Text {...PMONO} style={[s.code, { color: c.foregroundMuted, fontSize: s.code.fontSize + 0.5 }]}>$</Text>
               <CodeLine text={data.command} theme={theme} shell style={[s.code, { flex: 1, fontSize: s.code.fontSize + 0.5 }]} />
-              {data.cwd ? <Text style={[s.code, { color: c.foregroundMuted, fontSize: s.code.fontSize - 0.5 }]}>{data.cwd.split("/").pop()}</Text> : null}
+              {data.cwd ? <Text {...PMONO} style={[s.code, { color: c.foregroundMuted, fontSize: s.code.fontSize - 0.5 }]}>{data.cwd.split("/").pop()}</Text> : null}
             </View>
           ) : null}
           {data.text ? (
             <Scroll>
-              <Text style={[s.code, s.blockBody, { color: c.foregroundMuted }]} selectable>
+              <Text {...PMONO} style={[s.code, s.blockBody, { color: c.foregroundMuted }]} selectable>
                 {data.text}
               </Text>
             </Scroll>
@@ -361,8 +372,8 @@ function ToolDetail({ data, theme }: { data: NonNullable<ToolData["detail"]>; th
                 const color = l.sign === "+" ? c.statusSuccess : l.sign === "-" ? c.statusDanger : undefined;
                 return (
                   <View key={i} style={{ flexDirection: "row", gap: 12, paddingHorizontal: 12, paddingVertical: 1, backgroundColor: color ? alpha(color, 0.12) : undefined }}>
-                    <Text style={s.gutter}>{l.n ?? ""}</Text>
-                    <Text style={[s.code, { color: color ?? c.foregroundMuted, width: 10, marginRight: -6 }]}>{l.sign}</Text>
+                    <Text {...PMONO} style={s.gutter}>{l.n ?? ""}</Text>
+                    <Text {...PMONO} style={[s.code, { color: color ?? c.foregroundMuted, width: 10, marginRight: -6 }]}>{l.sign}</Text>
                     <CodeLine text={l.text} theme={theme} style={[s.code, { flex: 1 }]} />
                   </View>
                 );
@@ -395,7 +406,7 @@ function ToolDetail({ data, theme }: { data: NonNullable<ToolData["detail"]>; th
               {it.shell ? (
                 <CodeLine text={it.text} theme={theme} shell style={[s.code, { flexShrink: 1 }]} />
               ) : (
-                <Text numberOfLines={1} style={[s.code, { flexShrink: 1 }]}>
+                <Text {...PMONO} numberOfLines={1} style={[s.code, { flexShrink: 1 }]}>
                   {it.text}
                 </Text>
               )}
@@ -481,10 +492,10 @@ export function StepsItem(props: PluginTimelineItemProps<z.output<typeof stepsSc
 /** The merged row. Done, it says what the run did and how long it took; working, it names the step in progress; a failed step turns
  * the icon red. Open, it lists the steps as their own rows. A lone step renders as itself. The dashboard preview draws it from samples. */
 export function MergedSteps(
-  props: PluginTimelineItemProps<unknown> & { steps: Array<{ item: AgentTimelineItem; phase: "streaming" | "complete" }>; ms?: number; growing: boolean },
+  props: PluginTimelineItemProps<unknown> & { steps: Array<{ item: AgentTimelineItem; phase: "streaming" | "complete" }>; ms?: number; growing: boolean; defaultOpen?: boolean },
 ) {
-  const { item, theme, layout, steps, ms, growing } = props;
-  const [open, toggle] = useDisclosure(false);
+  const { item, theme, layout, steps, ms, growing, defaultOpen } = props;
+  const [open, toggle] = useDisclosure(!!defaultOpen);
   const icons = !!useIndent("steps");
   const step = ({ item: step, phase }: (typeof steps)[number]) =>
     step.type === "tool_call" ? (
@@ -630,7 +641,7 @@ export function TodoItem({ item, theme }: PluginTimelineItemProps<z.output<typeo
           <Icon name="ListChecks" size={15} color={c.foregroundMuted} />
         </View>
         <Text style={s.verb}>Tasks</Text>
-        <Text style={[s.code, { color: c.foregroundMuted }]}>
+        <Text {...PMONO} style={[s.code, { color: c.foregroundMuted }]}>
           {done} / {items.length}
         </Text>
         <View style={{ width: 120, height: 3, borderRadius: 2, backgroundColor: c.surface2 }}>
@@ -783,8 +794,8 @@ export function RecapItem({ item, theme }: PluginTimelineItemProps<Recap>) {
     parts.push(
       <View key="files" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
         <Text style={[text, { color: c.foreground }]}>{count(files.length, "file")}</Text>
-        {added ? <Text style={[mono, { color: c.statusSuccess }]}>+{added}</Text> : null}
-        {removed ? <Text style={[mono, { color: c.statusDanger }]}>−{removed}</Text> : null}
+        {added ? <Text {...PMONO} style={[mono, { color: c.statusSuccess }]}>+{added}</Text> : null}
+        {removed ? <Text {...PMONO} style={[mono, { color: c.statusDanger }]}>−{removed}</Text> : null}
         <Diffstat added={added} removed={removed} theme={theme} />
       </View>,
     );
@@ -819,14 +830,14 @@ export function RecapItem({ item, theme }: PluginTimelineItemProps<Recap>) {
               const cut = f.path.lastIndexOf("/") + 1;
               return (
                 <View key={f.path} style={{ flexDirection: "row", alignItems: "center", gap: 10, minHeight: 26 }}>
-                  <Text numberOfLines={1} ellipsizeMode="head" style={[mono, { flexShrink: 1 }]} selectable>
+                  <Text {...PMONO} numberOfLines={1} ellipsizeMode="head" style={[mono, { flexShrink: 1 }]} selectable>
                     <Text style={{ color: c.foregroundMuted }}>{f.path.slice(0, cut)}</Text>
                     {f.path.slice(cut)}
                   </Text>
                   <View style={{ flex: 1 }} />
                   <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 6, minWidth: 76 }}>
-                    {f.added ? <Text style={[mono, { color: c.statusSuccess }]}>+{f.added}</Text> : null}
-                    {f.removed ? <Text style={[mono, { color: c.statusDanger }]}>−{f.removed}</Text> : null}
+                    {f.added ? <Text {...PMONO} style={[mono, { color: c.statusSuccess }]}>+{f.added}</Text> : null}
+                    {f.removed ? <Text {...PMONO} style={[mono, { color: c.statusDanger }]}>−{f.removed}</Text> : null}
                   </View>
                   <Diffstat added={f.added} removed={f.removed} theme={theme} />
                 </View>
@@ -835,10 +846,10 @@ export function RecapItem({ item, theme }: PluginTimelineItemProps<Recap>) {
             {failed.map((f, i) => (
               <View key={i} style={{ flexDirection: "row", alignItems: "center", gap: 8, minHeight: 26 }}>
                 {dot}
-                <Text numberOfLines={1} style={[mono, { flexShrink: 1 }]} selectable>
+                <Text {...PMONO} numberOfLines={1} style={[mono, { flexShrink: 1 }]} selectable>
                   {f.command}
                 </Text>
-                {f.exit ? <Text style={[mono, { color: c.statusDanger }]}>exit {f.exit}</Text> : null}
+                {f.exit ? <Text {...PMONO} style={[mono, { color: c.statusDanger }]}>exit {f.exit}</Text> : null}
               </View>
             ))}
           </View>

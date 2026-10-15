@@ -92,13 +92,15 @@ export interface HostAppearance {
   contentSize: number;
   codeSize: number;
   pluginThemeId?: string;
+  /** Settings → Appearance → Theme: a Paseo theme id, or "plugin" for one a plugin contributes. */
+  theme?: string;
   /** Settings → Appearance → Always expand reasoning. */
   autoExpandReasoning: boolean;
   /** Settings → Tool call display: "overview" (Summary) groups consecutive calls, "detailed" lists each one. */
   toolCallDetail: "overview" | "detailed";
 }
 
-const DEFAULTS: HostAppearance = { contentSize: 15, codeSize: 12, autoExpandReasoning: false, toolCallDetail: "detailed" };
+export const DEFAULTS: HostAppearance = { contentSize: 15, codeSize: 12, autoExpandReasoning: false, toolCallDetail: "detailed" };
 let cache: { at: number; value: HostAppearance } | undefined;
 
 const text = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
@@ -122,6 +124,7 @@ export function readHostAppearance(): HostAppearance {
         contentSize: size(s.contentFontSize, DEFAULTS.contentSize),
         codeSize: size(s.codeFontSize, DEFAULTS.codeSize),
         pluginThemeId: s.theme === "plugin" ? text(s.pluginThemeId) : undefined,
+        theme: text(s.theme),
         autoExpandReasoning: s.autoExpandReasoning === true,
         // Same fallback as Paseo: the legacy compactToolCalls flag, then "detailed"; "concise" is the old "overview".
         toolCallDetail: ["overview", "concise"].includes(String(s.toolCallDetailLevel)) || (s.toolCallDetailLevel === undefined && s.compactToolCalls === true) ? "overview" : "detailed",
@@ -143,9 +146,18 @@ export const canSetAppTheme = Platform.OS === "web";
  * ponytail: writes Paseo's private settings document (undocumented); replace with a host
  * "select theme" API once Paseo offers one.
  */
-export function setAppTheme(catalogId: string) {
-  updateAppSettings({ theme: "plugin", pluginThemeId: catalogId });
+export function setAppTheme(catalogId: string, extra: Record<string, unknown> = {}) {
+  updateAppSettings({ ...extra, theme: "plugin", pluginThemeId: catalogId });
 }
+
+/**
+ * Paseo's font stacks when Settings → Appearance leaves a font empty.
+ * ponytail: copied from Paseo 0.11.x (DEFAULT_UI_FONT_STACK / DEFAULT_MONO_FONT_STACK); update if Paseo changes them.
+ */
+export const PASEO_FONT_STACKS = {
+  ui: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+  mono: "SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+};
 
 /** Changes Paseo's own app settings (desktop/web) and reloads so Paseo picks them up. Same caveat as setAppTheme. */
 export function updateAppSettings(patch: Record<string, unknown>) {
@@ -356,7 +368,8 @@ const SECONDARY = ':is([data-testid="permission-request-deny"], [data-testid="qu
 // clockwise chase (dots 4, 6, 5, 3, 1, 2) as a CSS animation runs smoothly on the compositor.
 // WORKING_BOX is the indicator's 14px box (tagged by tagParts; the dashboard preview draws one too), its first child Paseo's 2 × 3 grid.
 const WORKING_BOX = '[data-cp-part="loader"]';
-const DOT = `${WORKING_BOX} > div:first-child > div`;
+// The dashboard's "Dots" loader tile ([data-cp-dots]) shares the animation.
+const DOT = `:is(${WORKING_BOX}, [data-cp-dots]) > div:first-child > div`;
 const WORKING_DOTS = `${DOT} { animation: cp-dots 0.8s linear infinite !important; }
 ${[4, 5, 3, 0, 2, 1].map((step, i) => `${DOT}:nth-child(${i + 1}) { animation-delay: ${((step - 6) * 0.8) / 6}s !important; }`).join("\n")}
 @keyframes cp-dots { 0% { opacity: 1; } 70%, 90% { opacity: 0.15; } 100% { opacity: 1; } }
@@ -364,7 +377,8 @@ ${[4, 5, 3, 0, 2, 1].map((step, i) => `${DOT}:nth-child(${i + 1}) { animation-de
 
 // Other loaders (Dashboard → Messages → Working indicator): tagParts puts nine <i> over the box, Paseo's grid hides,
 // and each loader draws with the dots it needs (or the overlay's ::before). Sizes scale the whole box.
-const L = (name: string) => `:root[data-cp-rt-loader="${name}"] [data-cp-loader]`;
+// The dashboard's loader tiles carry their own overlay ([data-cp-loader][data-cp-tile="name"]) so each tile animates whatever is chosen globally.
+const L = (name: string) => `:is(:root[data-cp-rt-loader="${name}"] [data-cp-loader]:not([data-cp-tile]), [data-cp-loader][data-cp-tile="${name}"])`;
 const RING = [0, 1, 2, 3, 4, 5, 6, 7];
 const LOADERS = `
 ${WORKING_BOX} { position: relative; }
@@ -372,7 +386,7 @@ ${WORKING_BOX} { position: relative; }
 :root[data-cp-rt-loader-size="l"] ${WORKING_BOX} { transform: scale(1.3); }
 [data-cp-loader] { display: none; position: absolute; inset: 0; pointer-events: none; color: var(--cp-fg); }
 :root[data-cp-rt-loader] ${WORKING_BOX} > div:first-child { visibility: hidden; }
-:root[data-cp-rt-loader] [data-cp-loader] { display: block; }
+:root[data-cp-rt-loader] [data-cp-loader], [data-cp-loader][data-cp-tile] { display: block; }
 [data-cp-loader] > i { position: absolute; display: none; border-radius: 50%; background: currentColor; }
 ${[...Array(9)].map((_, i) => `[data-cp-loader] > i:nth-child(${i + 1}) { --i: ${i}; --c: ${i % 3}; --r: ${Math.floor(i / 3)}; --m: ${Math.max(Math.abs((i % 3) - 1), Math.abs(Math.floor(i / 3) - 1))}; --s: ${[0, 1, 2, 5, 4, 3, 6, 7, 8].indexOf(i)}; }`).join("\n")}
 @keyframes cp-tail { 0% { opacity: 1; } 100% { opacity: 0.15; } }

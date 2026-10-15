@@ -2,16 +2,16 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon, ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
-import { useEffect, useState, type ReactNode } from "react";
-import { Image, Pressable, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
+import { useEffect, useMemo, useState, type ComponentProps, type CSSProperties, type ReactNode } from "react";
+import { Image, Pressable, StyleSheet, Text, View, type DimensionValue, type LayoutChangeEvent } from "react-native";
 import { contrast, isHex, PRESETS, THEME_CATALOG_ID, themeSchema, themeSettings, TOKEN_ROLES, TOKENS, type ThemeDraft, type Token } from "../shared/theme";
-import { HIDEABLE, ICON_KINDS, prefsSettings, RICH_TEXT, type Hideable, type IconKind, type Loader, type Prefs, type RichText } from "../shared/timeline";
+import { HIDEABLE, ICON_KINDS, LOADERS, prefsSettings, RICH_TEXT, type Hideable, type IconKind, type Loader, type Prefs, type RichText } from "../shared/timeline";
 import { hideableKind, toolData } from "./model";
 import { PrefsOverride, setPrefs, usePrefs } from "./prefs";
 import { registerTheme, useCurrentTheme } from "./theme-registry";
-import { highlightShell, PLAIN_SYNTAX, SYNTAX_THEMES } from "./highlight";
-import { alpha, ImagesItem, MergedSteps, sunken, SyntaxOverride, ThoughtItem, ToolItem, useStyles } from "./views";
-import { canSetAppTheme, readHostAppearance, readSyntaxTheme, setAppTheme, updateAppSettings } from "./web";
+import { PLAIN_SYNTAX, SYNTAX_THEMES } from "./highlight";
+import { alpha, AppearanceOverride, CodeLine, ImagesItem, MergedSteps, PMONO, sunken, SyntaxOverride, ThoughtItem, ToolItem, useStyles } from "./views";
+import { canSetAppTheme, DEFAULTS, PASEO_FONT_STACKS, readHostAppearance, readSyntaxTheme, setAppTheme, updateAppSettings } from "./web";
 
 type ToolCall = Extract<AgentTimelineItem, { type: "tool_call" }>;
 const call = (detail: ToolCall["detail"], extra?: Partial<ToolCall>) =>
@@ -26,17 +26,78 @@ const PREVIEW_CALLS = [
   call({ type: "plain_text", label: "Dev server exited", text: "<task-notification/>" }, { name: "task_notification" }),
 ];
 
+// The Theme page's Code view: an edit diff, a quiet and a failed shell call, and an MCP call with input and output.
+const CODE_CALLS = [
+  call({ type: "edit", filePath: "/tmp/cp-ui-sample/auth.ts", oldString: "  if (!ok) return deny(401);", newString: "  if (!ok) return deny(403);" }),
+  call({ type: "shell", command: "ls -la && head -5 auth.ts", output: "" }),
+  call({ type: "shell", command: 'node -e "process.exit(1)"', output: "", exitCode: 1 }, { status: "failed" }),
+  call(
+    {
+      type: "unknown",
+      input: {},
+      output: [{ id: "write", label: "Write Approval", colorTier: "moderate" }, { id: "read", label: "Read Only", colorTier: "safe" }].map((m) => ({ mode: m, status: "available" })),
+    },
+    { name: "mcp__paseo__list_providers" },
+  ),
+];
+const CODE_REPLY = ["export function requireAuth(req, next) {", "  const token = verifyToken(req);", "  if (!token) return deny(401);", "  next();", "}"];
+
 // 2×2 pixels in the Mariana accents; scaled up it reads as a soft gradient screenshot.
 const PREVIEW_IMAGE = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAF0lEQVR4nGNIm3nm6JSjDPGbN//angwANX4Hw07OqLUAAAAASUVORK5CYII=";
 
-type Page = "theme" | "messages" | "rich" | "reasoning" | "tools";
-const PAGES: Array<{ id: Page; icon: string; label: string }> = [
-  { id: "theme", icon: "Palette", label: "Theme" },
-  { id: "messages", icon: "MessageSquareText", label: "Messages" },
-  { id: "rich", icon: "Type", label: "Rich text" },
-  { id: "reasoning", icon: "Brain", label: "Reasoning" },
-  { id: "tools", icon: "Wrench", label: "Tool call" },
+type Page = "theme" | "messages" | "steps" | "rich";
+const PAGES: Array<{ id: Page; icon: string; label: string; group: string }> = [
+  { id: "theme", icon: "Palette", label: "Theme", group: "APPEARANCE" },
+  { id: "messages", icon: "MessageSquareText", label: "Messages", group: "CHAT" },
+  { id: "steps", icon: "ListTree", label: "Steps", group: "CHAT" },
+  { id: "rich", icon: "Type", label: "Rich text", group: "CHAT" },
 ];
+
+// ponytail: Paseo's built-in app themes, copied from Paseo 0.11.x (plugins can't read them); refresh when Paseo adds or retunes one.
+interface PaseoTheme {
+  id: string;
+  name: string;
+  appearance: "light" | "dark";
+  colors: { background: string; raised: string; control: string; border: string; foreground: string; muted: string; accent: string };
+}
+const paseoTheme = (id: string, name: string, appearance: "light" | "dark", c: string): PaseoTheme => {
+  const [background, raised, control, border, foreground, muted, accent] = c.split(" ") as [string, string, string, string, string, string, string];
+  return { id, name, appearance, colors: { background, raised, control, border, foreground, muted, accent } };
+};
+const PASEO_LIGHT = paseoTheme("light", "Light", "light", "#ffffff #fafafa #f4f4f5 #e4e4e7 #1a1a1e #71717a #20744A");
+const PASEO_DARK = paseoTheme("dark", "Dark", "dark", "#181B1A #1E2120 #272A29 #252B2A #fafafa #A1A5A4 #20744A");
+const PASEO_THEMES: PaseoTheme[] = [
+  { ...PASEO_DARK, id: "auto", name: "System" },
+  PASEO_LIGHT,
+  PASEO_DARK,
+  paseoTheme("zinc", "Zinc", "dark", "#18181b #1f1f22 #27272a #27272a #fafafa #a1a1aa #e4e4e7"),
+  paseoTheme("midnight", "Midnight", "dark", "#161820 #1c1e27 #252731 #242636 #fafafa #9a9db0 #3b6fcf"),
+  paseoTheme("claude", "Claude", "dark", "#1f1f1e #262523 #2f2d2b #2c2a27 #fafafa #ada9a5 #d97757"),
+  paseoTheme("ghostty", "Ghostty", "dark", "#282c34 #2f333d #383c48 #353a47 #fafafa #c8ccd8 #89b4fa"),
+  paseoTheme("pureBlack", "Pure Black", "dark", "#000000 #0a0a0a #111111 #1c1c1c #fafafa #a1a1aa #20744A"),
+];
+
+/** System follows the OS: the tile shows both halves, the preview whichever is on now. */
+function resolvePaseo(t: PaseoTheme): PaseoTheme {
+  if (t.id !== "auto") return t;
+  const dark = (globalThis as { matchMedia?: (q: string) => { matches: boolean } }).matchMedia?.("(prefers-color-scheme: dark)").matches ?? true;
+  return dark ? PASEO_DARK : PASEO_LIGHT;
+}
+
+/** A Paseo theme as a draft, so the preview and color tiles read it like any other; ring is Paseo's muted. */
+function paseoDraft(t: PaseoTheme, syntax: string): ThemeDraft {
+  const { colors: c, appearance } = resolvePaseo(t);
+  return { name: t.name, appearance, sidebar: "", syntax, colors: { background: c.background, raised: c.raised, control: c.control, border: c.border, foreground: c.foreground, mutedForeground: c.muted, ring: c.muted, accent: c.accent } };
+}
+
+/** Fonts and sizes as Paseo's Settings → Appearance keeps them; empty fonts are the system default. */
+interface Typography {
+  uiFont: string;
+  contentSize: number;
+  monoFont: string;
+  codeSize: number;
+}
+
 
 const sameColors = (a: ThemeDraft["colors"], b: ThemeDraft["colors"]) => TOKENS.every((t) => a[t].toLowerCase() === b[t].toLowerCase());
 
@@ -85,12 +146,15 @@ function Button({ theme, label, icon, primary, disabled, onPress }: { theme: Plu
   );
 }
 
-function Segmented<T extends string>({ theme, value, options, onChange }: { theme: PluginTheme; value: T; options: Array<[T, string, string?]>; onChange(v: T): void }) {
+
+
+/** Options are [value, icon, label?, paseo?]; an empty icon leaves it out, and `paseo` marks the choice that leaves Paseo as is. */
+function Segmented<T extends string>({ theme, value, options, onChange }: { theme: PluginTheme; value: T; options: Array<[T, string, string?, boolean?]>; onChange(v: T): void }) {
   const s = useStyles(theme);
   const c = theme.colors;
   return (
     <View style={{ flexDirection: "row", padding: 2, gap: 2, borderRadius: 8, backgroundColor: c.surface2 }}>
-      {options.map(([v, icon, label]) => {
+      {options.map(([v, icon, label, paseo]) => {
         const on = v === value;
         return (
           <Pressable
@@ -101,8 +165,9 @@ function Segmented<T extends string>({ theme, value, options, onChange }: { them
             onPress={() => onChange(v)}
             style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, backgroundColor: on ? c.surface1 : undefined }}
           >
-            <Icon name={icon} size={13} color={on ? c.foreground : c.foregroundMuted} />
+            {icon ? <Icon name={icon} size={13} color={on ? c.foreground : c.foregroundMuted} /> : null}
             {label ? <Text style={[s.small, { fontSize: 12, color: on ? c.foreground : c.foregroundMuted }]}>{label}</Text> : null}
+            {paseo ? <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: c.foregroundMuted }} /> : null}
           </Pressable>
         );
       })}
@@ -110,17 +175,18 @@ function Segmented<T extends string>({ theme, value, options, onChange }: { them
   );
 }
 
+/** A caps label with a quiet hint on the right. */
 function SectionHead({ theme, title, hint }: { theme: PluginTheme; title: string; hint?: string }) {
   const s = useStyles(theme);
   return (
     <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-      <Text style={[s.title, { fontSize: 13 }]}>{title}</Text>
+      <Text style={[s.label, { fontSize: 11, marginBottom: 0 }]}>{title.toUpperCase()}</Text>
       {hint ? <Text style={[s.small, { fontSize: 11 }]}>{hint}</Text> : null}
     </View>
   );
 }
 
-/** A small full-radius tag: "Desktop", "Paseo default", "Live". */
+/** A small full-radius tag: "Live", "AA". */
 function Badge({ theme, label, icon, tone }: { theme: PluginTheme; label: string; icon?: string; tone?: string }) {
   const s = useStyles(theme);
   const c = theme.colors;
@@ -132,37 +198,117 @@ function Badge({ theme, label, icon, tone }: { theme: PluginTheme; label: string
   );
 }
 
-/** A settings section: title (with a Desktop tag for desktop-only settings), one line on what it covers, then the control. */
-function Section({ theme, title, description, desktop, first, children }: { theme: PluginTheme; title: string; description: string; desktop?: boolean; first?: boolean; children: ReactNode }) {
-  const s = useStyles(theme);
-  return (
-    <View style={{ gap: 14, paddingTop: first ? 0 : 20, borderTopWidth: first ? 0 : StyleSheet.hairlineWidth, borderTopColor: theme.colors.border }}>
-      <View style={{ gap: 4 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <Text style={[s.title, { fontSize: 14 }]}>{title}</Text>
-          {desktop ? <Badge theme={theme} label="Desktop" icon="Monitor" /> : null}
-        </View>
-        <Text style={[s.small, { fontSize: 12 }]}>{description}</Text>
-      </View>
-      {children}
-    </View>
-  );
-}
-
 /** An informational box: accent icon, text, and an optional action on the right. */
-function Notice({ theme, children, action }: { theme: PluginTheme; children: ReactNode; action?: ReactNode }) {
+function Notice({ theme, icon = "Info", children, action }: { theme: PluginTheme; icon?: string; children: ReactNode; action?: ReactNode }) {
   const s = useStyles(theme);
   const c = theme.colors;
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 10, padding: 12, borderRadius: 8, backgroundColor: c.surface1, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border }}>
-      <Icon name="Info" size={14} color={c.accent} />
+      <Icon name={icon} size={14} color={icon === "Info" ? c.accent : c.foregroundMuted} />
       <Text style={[s.small, { flex: 1, fontSize: 12, lineHeight: 17, color: c.foreground }]}>{children}</Text>
       {action}
     </View>
   );
 }
 
-function InnerNav({ theme, host, page, onSelect }: { theme: PluginTheme; host: string; page: Page; onSelect(p: Page): void }) {
+function Switch({ theme, value, label, onChange }: { theme: PluginTheme; value: boolean; label: string; onChange(v: boolean): void }) {
+  const c = theme.colors;
+  return (
+    <Pressable
+      accessibilityRole="switch"
+      accessibilityLabel={label}
+      accessibilityState={{ checked: value }}
+      onPress={() => onChange(!value)}
+      style={{ width: 30, height: 18, padding: 2, borderRadius: 9, justifyContent: "center", backgroundColor: value ? c.accent : c.surface2 }}
+    >
+      <View style={{ width: 14, height: 14, borderRadius: 7, alignSelf: value ? "flex-end" : "flex-start", backgroundColor: value ? c.accentForeground : c.foregroundMuted }} />
+    </Pressable>
+  );
+}
+
+/** A toggle chip: on shows a check on an accent tint, off an eye-off icon and muted text. */
+function Chip({ theme, on, label, onPress }: { theme: PluginTheme; on: boolean; label: string; onPress(): void }) {
+  const s = useStyles(theme);
+  const c = theme.colors;
+  return (
+    <Pressable
+      accessibilityRole="checkbox"
+      accessibilityState={{ checked: on }}
+      onPress={onPress}
+      style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 11, paddingVertical: 6, borderRadius: 999, borderWidth: 1, borderColor: on ? alpha(c.accent, 0.55) : c.border, backgroundColor: on ? alpha(c.accent, 0.12) : undefined }}
+    >
+      <Icon name={on ? "Check" : "EyeOff"} size={13} color={on ? c.accent : c.foregroundMuted} />
+      <Text style={[s.small, { fontSize: 13, color: on ? c.foreground : c.foregroundMuted }]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+/** Small caps title above a raised, hairline-bordered card; `top` sits between them (a notice). */
+function Group({ theme, title, top, children }: { theme: PluginTheme; title: string; top?: ReactNode; children: ReactNode }) {
+  const c = theme.colors;
+  return (
+    <View style={{ gap: 10 }}>
+      <SectionHead theme={theme} title={title} />
+      {top}
+      <View style={{ borderRadius: 10, backgroundColor: c.surface1, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, overflow: "hidden" }}>{children}</View>
+    </View>
+  );
+}
+
+/** A setting: label and one-line hint on the left, the control on the right (or under them when `stacked`). */
+function Row({ theme, label, hint, stacked, first, children }: { theme: PluginTheme; label: string; hint: string; stacked?: boolean; first?: boolean; children: ReactNode }) {
+  const s = useStyles(theme);
+  const text = (
+    <View style={{ flex: stacked ? undefined : 1, gap: 2 }}>
+      <Text style={[s.verb, { fontSize: 13 }]}>{label}</Text>
+      <Text style={[s.small, { fontSize: 12 }]}>{hint}</Text>
+    </View>
+  );
+  return (
+    <View style={{ paddingHorizontal: 16, paddingVertical: 12, borderTopWidth: first ? 0 : StyleSheet.hairlineWidth, borderTopColor: theme.colors.border }}>
+      {stacked ? (
+        <View style={{ gap: 10 }}>
+          {text}
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>{children}</View>
+        </View>
+      ) : (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
+          {text}
+          {children}
+        </View>
+      )}
+    </View>
+  );
+}
+
+/** "• Paseo's default", the key to the dot on Segmented options. */
+function Legend({ theme }: { theme: PluginTheme }) {
+  const s = useStyles(theme);
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+      <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: theme.colors.foregroundMuted }} />
+      <Text style={[s.small, { fontSize: 12 }]}>Paseo's default</Text>
+    </View>
+  );
+}
+
+/** The switch for restyling Paseo's own items; it gates Rich text and the loaders, so it sits outside any one page. */
+function RestyleCard({ theme, prefs, onChange }: { theme: PluginTheme; prefs: Prefs; onChange(p: Prefs): void }) {
+  const s = useStyles(theme);
+  const c = theme.colors;
+  return (
+    <View style={{ gap: 6, padding: 10, borderRadius: 10, backgroundColor: c.surface1, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+        <Icon name="Paintbrush" size={14} color={c.foregroundMuted} />
+        <Text style={[s.verb, { flex: 1, fontSize: 13 }]}>Restyle Paseo's items</Text>
+        <Switch theme={theme} label="Restyle Paseo's items" value={prefs.nativeStyle === "design"} onChange={(on) => onChange({ ...prefs, nativeStyle: on ? "design" : "paseo" })} />
+      </View>
+      <Text style={[s.small, { fontSize: 12 }]}>Bubbles, tool groups and markdown. Rich text and loaders need it.</Text>
+    </View>
+  );
+}
+
+function InnerNav({ theme, host, page, prefs, onSelect, onPrefs }: { theme: PluginTheme; host: string; page: Page; prefs: Prefs; onSelect(p: Page): void; onPrefs(p: Prefs): void }) {
   const s = useStyles(theme);
   const c = theme.colors;
   const item = ({ id, icon, label }: (typeof PAGES)[number]) => {
@@ -188,9 +334,8 @@ function InnerNav({ theme, host, page, onSelect }: { theme: PluginTheme; host: s
       </Pressable>
     );
   };
-  const group = (label: string) => <Text style={[s.label, { paddingHorizontal: 8, marginBottom: 2 }]}>{label}</Text>;
   return (
-    <View style={{ width: 232, paddingHorizontal: 12, paddingVertical: 20, gap: 24, borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: c.border }}>
+    <View style={{ width: 248, paddingHorizontal: 12, paddingVertical: 20, gap: 24, borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: c.border }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 8 }}>
         <View style={{ width: 24, height: 24, borderRadius: 6, backgroundColor: c.accent, alignItems: "center", justifyContent: "center" }}>
           <Icon name="Sparkles" size={14} color={c.accentForeground} />
@@ -200,15 +345,14 @@ function InnerNav({ theme, host, page, onSelect }: { theme: PluginTheme; host: s
           <Text style={[s.small, { fontSize: 11 }]}>Paseo plugin</Text>
         </View>
       </View>
-      <View style={{ gap: 2 }}>
-        {group("APPEARANCE")}
-        {item(PAGES[0]!)}
-      </View>
-      <View style={{ gap: 2 }}>
-        {group("TIMELINE ITEMS")}
-        {PAGES.slice(1).map(item)}
-      </View>
+      {["APPEARANCE", "CHAT"].map((group) => (
+        <View key={group} style={{ gap: 2 }}>
+          <Text style={[s.label, { paddingHorizontal: 8, marginBottom: 2 }]}>{group}</Text>
+          {PAGES.filter((p) => p.group === group).map(item)}
+        </View>
+      ))}
       <View style={{ flex: 1 }} />
+      {canSetAppTheme ? <RestyleCard theme={theme} prefs={prefs} onChange={onPrefs} /> : null}
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 8 }}>
         <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: c.statusSuccess }} />
         <Text style={[s.small, { fontSize: 11 }]} numberOfLines={1}>
@@ -219,453 +363,822 @@ function InnerNav({ theme, host, page, onSelect }: { theme: PluginTheme; host: s
   );
 }
 
-function Editor({ theme, draft, setDraft }: { theme: PluginTheme; draft: ThemeDraft; setDraft(d: ThemeDraft): void }) {
-  const s = useStyles(theme);
-  const c = theme.colors;
-  // Hex text being typed; only valid values reach the draft.
-  const [typing, setTyping] = useState<Partial<Record<Token | "sidebar", string>>>({});
-  useEffect(() => setTyping({}), [draft.colors, draft.sidebar]);
-  const selected = PRESETS.find((p) => sameColors(p.colors, draft.colors) && (p.sidebar ?? "") === draft.sidebar && p.syntax === draft.syntax)?.id;
-  const ratios = [
-    ["foreground", contrast(draft.colors.foreground, draft.colors.background)],
-    ["muted", contrast(draft.colors.mutedForeground, draft.colors.background)],
-    ["accent", contrast(draft.colors.accent, draft.colors.background)],
-  ] as const;
-  const passes = ratios.every(([, r]) => r >= 4.5);
-  const input = { ...s.target, color: c.foreground, backgroundColor: c.surface2, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 7 };
 
+const chunk = <T,>(a: T[], n: number) => Array.from({ length: Math.ceil(a.length / n) }, (_, i) => a.slice(i * n, i * n + n));
+
+/** Tiles in rows of `n`; a short last row is padded so its tiles keep the same width. */
+function Grid({ n, gap = 8, children }: { n: number; gap?: number; children: ReactNode[] }) {
   return (
-    <View style={{ gap: 28 }}>
-      <View style={{ gap: 12 }}>
-        <SectionHead theme={theme} title="Presets" hint={`${PRESETS.length} themes`} />
-        <View style={{ flexDirection: "row", gap: 8 }}>
-          {PRESETS.map((p) => {
-            const on = p.id === selected;
-            return (
-              <Pressable
-                key={p.id}
-                accessibilityRole="button"
-                accessibilityState={{ selected: on }}
-                onPress={() => setDraft({ name: p.name, appearance: p.appearance, colors: { ...p.colors }, sidebar: p.sidebar ?? "", syntax: p.syntax })}
-                style={{ flex: 1, padding: 8, gap: 8, borderRadius: 8, backgroundColor: c.surface1, borderWidth: on ? 1.5 : StyleSheet.hairlineWidth, borderColor: on ? c.accent : c.border }}
-              >
-                <View style={{ flexDirection: "row", height: 40, borderRadius: 4, overflow: "hidden" }}>
-                  {(["background", "raised", "accent", "foreground"] as const).map((k) => (
-                    <View key={k} style={{ flex: 1, backgroundColor: p.colors[k] }} />
-                  ))}
-                </View>
-                <Text style={[s.small, { fontSize: 12, color: on ? c.foreground : c.foregroundMuted }]} numberOfLines={2}>
-                  {p.name}
-                </Text>
-              </Pressable>
-            );
-          })}
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="New theme from current colors"
-            onPress={() => setDraft({ ...draft, name: "Custom theme" })}
-            style={{ width: 64, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, alignItems: "center", justifyContent: "center", gap: 6 }}
-          >
-            <Icon name="Plus" size={16} color={c.foregroundMuted} />
-            <Text style={[s.small, { fontSize: 11 }]}>New</Text>
-          </Pressable>
+    <View style={{ gap }}>
+      {chunk(children, n).map((row, i) => (
+        <View key={i} style={{ flexDirection: "row", gap }}>
+          {row}
+          {Array.from({ length: n - row.length }, (_, j) => (
+            <View key={`pad${j}`} style={{ flex: 1 }} />
+          ))}
         </View>
-      </View>
-
-      <View style={{ gap: 12 }}>
-        <SectionHead theme={theme} title="Identity" />
-        <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
-          <TextInput
-            accessibilityLabel="Theme name"
-            value={draft.name}
-            onChangeText={(name) => setDraft({ ...draft, name: name || " " })}
-            style={[input, { flex: 1 }]}
-          />
-          <Segmented
-            theme={theme}
-            value={draft.appearance}
-            onChange={(appearance) => setDraft({ ...draft, appearance })}
-            options={[
-              ["light", "Sun", "Light"],
-              ["dark", "Moon", "Dark"],
-            ]}
-          />
-        </View>
-      </View>
-
-      <View style={{ gap: 12 }}>
-        <SectionHead theme={theme} title="Colors" hint="PluginThemeColors" />
-        <View style={{ borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, overflow: "hidden" }}>
-          {TOKENS.map((t, i) => {
-            const text = typing[t] ?? draft.colors[t];
-            const bad = !isHex(text);
-            return (
-              <View key={t} style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 12, paddingVertical: 9, borderTopWidth: i ? StyleSheet.hairlineWidth : 0, borderTopColor: c.border }}>
-                <View style={{ width: 22, height: 22, borderRadius: 5, backgroundColor: draft.colors[t], borderWidth: StyleSheet.hairlineWidth, borderColor: c.border }} />
-                <View style={{ flex: 1, gap: 2 }}>
-                  <Text style={[s.code, { color: c.foreground }]}>{t}</Text>
-                  <Text style={[s.small, { fontSize: 11 }]}>{TOKEN_ROLES[t]}</Text>
-                </View>
-                <TextInput
-                  accessibilityLabel={`${t} hex color`}
-                  value={text}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  onChangeText={(v) => {
-                    const next = v.trim().startsWith("#") ? v.trim() : `#${v.trim()}`;
-                    setTyping({ ...typing, [t]: v });
-                    if (isHex(next)) setDraft({ ...draft, colors: { ...draft.colors, [t]: next.toLowerCase() } });
-                  }}
-                  style={[input, s.code, { width: 96, paddingVertical: 4, color: c.foreground, borderColor: bad ? c.statusDanger : c.border }]}
-                />
-              </View>
-            );
-          })}
-          {canSetAppTheme ? (
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 12, paddingVertical: 9, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: c.border }}>
-              <View style={{ width: 22, height: 22, borderRadius: 5, backgroundColor: draft.sidebar || draft.colors.background, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border }} />
-              <View style={{ flex: 1, gap: 2 }}>
-                <Text style={[s.code, { color: c.foreground }]}>sidebar</Text>
-                <Text style={[s.small, { fontSize: 11 }]}>Desktop sidebar, painted by the plugin · empty uses background</Text>
-              </View>
-              <TextInput
-                accessibilityLabel="sidebar hex color"
-                value={typing.sidebar ?? draft.sidebar}
-                autoCapitalize="none"
-                autoCorrect={false}
-                placeholder="#rrggbb"
-                onChangeText={(v) => {
-                  const t = v.trim();
-                  const next = !t ? "" : t.startsWith("#") ? t : `#${t}`;
-                  setTyping({ ...typing, sidebar: v });
-                  if (next === "" || isHex(next)) setDraft({ ...draft, sidebar: next.toLowerCase() });
-                }}
-                style={[input, s.code, { width: 96, paddingVertical: 4, color: c.foreground, borderColor: typing.sidebar && !isHex(typing.sidebar.startsWith("#") ? typing.sidebar : `#${typing.sidebar}`) ? c.statusDanger : c.border }]}
-              />
-            </View>
-          ) : null}
-        </View>
-        <View style={{ flexDirection: "row", gap: 8, alignItems: "flex-start" }}>
-          <Icon name={passes ? "CircleCheck" : "TriangleAlert"} size={14} color={passes ? c.statusSuccess : c.statusWarning} />
-          <Text style={[s.small, { flex: 1, fontSize: 11 }]}>
-            {ratios.map(([k, r]) => `${k} ${r.toFixed(1)}:1`).join(" · ")} on background — {passes ? "passes AA" : "below AA (4.5:1)"}
-          </Text>
-        </View>
-      </View>
-      <HighlightTheme theme={theme} draft={draft} setDraft={setDraft} />
+      ))}
     </View>
   );
 }
 
-const SAMPLE_COMMAND = 'rg -n "verifyToken" src | head -20 && npm test -- --watch';
-
-/** Highlight theme for code the plugin draws; Paseo's own code blocks are on the Assistant message page. */
-function HighlightTheme({ theme, draft, setDraft }: { theme: PluginTheme; draft: ThemeDraft; setDraft(d: ThemeDraft): void }) {
+/** A theme: "Aa" and an accent dot on its background (two halves for System), the name under it, a check when it is the app theme. */
+function ThemeTile({ theme, name, halves, selected, active, onPress }: { theme: PluginTheme; name: string; halves: Array<[string, string, string]>; selected: boolean; active: boolean; onPress(): void }) {
   const s = useStyles(theme);
   const c = theme.colors;
-  const options = [...SYNTAX_THEMES, { id: PLAIN_SYNTAX, name: "Plain", appearance: draft.appearance, colors: undefined }];
   return (
-    <View style={{ gap: 12 }}>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={name}
+      accessibilityState={{ selected }}
+      onPress={onPress}
+      style={{ flex: 1, borderRadius: 8, overflow: "hidden", backgroundColor: c.surface1, borderWidth: selected ? 1.5 : StyleSheet.hairlineWidth, borderColor: selected ? c.accent : c.border }}
+    >
+      <View style={{ flexDirection: "row", height: 42 }}>
+        {halves.map(([bg, fg, accent], i) => (
+          <View key={i} style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 10, backgroundColor: bg }}>
+            <Text style={[s.verb, { fontSize: 13, color: fg }]}>Aa</Text>
+            <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: accent }} />
+          </View>
+        ))}
+      </View>
+      <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 10, paddingVertical: 7 }}>
+        <Text style={[s.small, { flex: 1, fontSize: 12, color: selected ? c.foreground : c.foregroundMuted }]} numberOfLines={1}>
+          {name}
+        </Text>
+        {active ? <Icon name="Check" size={12} color={c.accent} /> : null}
+      </View>
+    </Pressable>
+  );
+}
+
+/** Height shared by the typography inputs, steppers and sample boxes so their rows line up; the size column has a fixed width so both font inputs match. */
+const FIELD = 34;
+const STEPPER = 104;
+
+const input = (s: ReturnType<typeof useStyles>, c: PluginTheme["colors"]) => ({ ...s.target, color: c.foreground, backgroundColor: c.surface0, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8 });
+
+function Stepper({ theme, value, label, onChange }: { theme: PluginTheme; value: number; label: string; onChange(v: number): void }) {
+  const s = useStyles(theme);
+  const c = theme.colors;
+  const step = (icon: string, by: number) => (
+    <Pressable accessibilityRole="button" accessibilityLabel={`${by < 0 ? "Decrease" : "Increase"} ${label}`} onPress={() => onChange(Math.min(32, Math.max(8, value + by)))} style={{ width: 28, height: FIELD - 2, alignItems: "center", justifyContent: "center" }}>
+      <Icon name={icon} size={13} color={c.foregroundMuted} />
+    </Pressable>
+  );
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", width: STEPPER, height: FIELD, borderRadius: 8, borderWidth: 1, borderColor: c.border, backgroundColor: c.surface0 }}>
+      {step("Minus", -1)}
+      <Text style={[s.target, { flex: 1, textAlign: "center", color: c.foreground, fontVariant: ["tabular-nums"] }]}>{value}</Text>
+      {step("Plus", 1)}
+    </View>
+  );
+}
+
+/** Paseo's Settings → Appearance fonts and sizes, free text like Paseo's own (empty is the system default). The dot marks Paseo's size. */
+function TypographySection({ theme, typo, setTypo }: { theme: PluginTheme; typo: Typography; setTypo(t: Typography): void }) {
+  const s = useStyles(theme);
+  const c = theme.colors;
+  const field = (label: string, key: "uiFont" | "monoFont", mono: boolean) => (
+    <View style={{ flex: 1, gap: 4 }}>
+      <Text style={[s.small, { fontSize: 12 }]}>{label}</Text>
+      <TextInput
+        accessibilityLabel={label}
+        value={typo[key]}
+        onChangeText={(v) => setTypo({ ...typo, [key]: v })}
+        placeholder="System default"
+        placeholderTextColor={c.foregroundMuted}
+        autoCapitalize="none"
+        autoCorrect={false}
+        {...(mono ? PMONO : null)}
+        style={[input(s, c), mono ? s.code : null, { color: c.foreground, height: FIELD, paddingVertical: 0 }]}
+      />
+    </View>
+  );
+  const size = (label: string, key: "contentSize" | "codeSize") => (
+    <View style={{ width: STEPPER, gap: 4 }}>
+      <Text style={[s.small, { fontSize: 12 }]} numberOfLines={1}>
+        {label}
+      </Text>
+      <Stepper theme={theme} value={typo[key]} label={label} onChange={(v) => setTypo({ ...typo, [key]: v })} />
+    </View>
+  );
+  const box = (children: ReactNode) => (
+    <View style={{ width: FIELD, height: FIELD, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: c.surface2 }}>{children}</View>
+  );
+  return (
+    <View style={{ gap: 10 }}>
+      <SectionHead theme={theme} title="Typography" hint="Settings → Appearance" />
+      <View style={{ borderRadius: 10, backgroundColor: c.surface1, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border }}>
+        <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 12, padding: 12 }}>
+          {box(<Text style={[s.title, { fontSize: 15 }, { "--paseo-ui-font": typo.uiFont || PASEO_FONT_STACKS.ui } as object]}>Ag</Text>)}
+          {field("Interface font", "uiFont", false)}
+          {size("Content size", "contentSize")}
+        </View>
+        <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 12, padding: 12, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: c.border }}>
+          {box(<Text {...PMONO} style={[s.code, { fontSize: 15, color: c.foreground }, { fontFamily: typo.monoFont || PASEO_FONT_STACKS.mono }]}>{"{}"}</Text>)}
+          {field("Code font", "monoFont", true)}
+          {size("Code size", "codeSize")}
+        </View>
+      </View>
+      <View style={{ flexDirection: "row", gap: 8, alignItems: "flex-start" }}>
+        <View style={{ height: 17, justifyContent: "center" }}>
+          <Icon name="RotateCw" size={13} color={c.foregroundMuted} />
+        </View>
+        <Text style={[s.small, { flex: 1, fontSize: 12, lineHeight: 17 }]}>Type any installed font, or leave empty for the system default. Paseo's sizes are {DEFAULTS.contentSize} and {DEFAULTS.codeSize}. Applies app-wide once you apply; Paseo reloads.</Text>
+      </View>
+    </View>
+  );
+}
+
+const TOKEN_LABEL: Partial<Record<Token, string>> = { mutedForeground: "muted" };
+const SURFACES: Token[] = ["background", "raised", "control", "border"];
+const TEXTS: Token[] = ["foreground", "mutedForeground", "ring", "accent"];
+
+/** A color: its swatch (text colors show "Aa" on the background and their contrast), name and hex. Clicking selects it for the hex editor. */
+function ColorTile({ theme, token, draft, selected, onPress }: { theme: PluginTheme; token: Token; draft: ThemeDraft; selected: boolean; onPress?(): void }) {
+  const s = useStyles(theme);
+  const c = theme.colors;
+  const color = draft.colors[token];
+  const text = TEXTS.includes(token);
+  const ratio = contrast(color, draft.colors.background);
+  const tone = token === "ring" ? undefined : ratio >= 4.5 ? c.statusSuccess : c.statusWarning;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ selected }}
+      disabled={!onPress}
+      onPress={onPress}
+      style={{ flex: 1, borderRadius: 8, overflow: "hidden", backgroundColor: c.surface1, borderWidth: selected ? 1.5 : StyleSheet.hairlineWidth, borderColor: selected ? c.accent : c.border }}
+    >
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, height: 44, paddingHorizontal: 10, backgroundColor: text ? draft.colors.background : color }}>
+        {text ? (
+          <>
+            <Text style={[s.verb, { fontSize: 15, color }]}>Aa</Text>
+            <View style={{ flex: 1 }} />
+            <View style={{ paddingHorizontal: 6, paddingVertical: 1, borderRadius: 999, backgroundColor: tone ? alpha(tone, 0.16) : alpha(c.foregroundMuted, 0.18) }}>
+              <Text style={[s.small, { fontSize: 10, lineHeight: 14, color: tone ?? c.foregroundMuted }]}>
+                {ratio.toFixed(1)} {token === "ring" ? "faint" : ratio >= 4.5 ? "AA" : "low"}
+              </Text>
+            </View>
+          </>
+        ) : null}
+      </View>
+      <View style={{ paddingHorizontal: 8, paddingVertical: 8, gap: 1 }}>
+        <Text {...PMONO} numberOfLines={1} style={[s.code, { fontSize: 11, color: c.foreground }]}>{TOKEN_LABEL[token] ?? token}</Text>
+        <Text {...PMONO} numberOfLines={1} style={[s.code, { fontSize: 11, color: c.foregroundMuted }]}>{color}</Text>
+      </View>
+    </Pressable>
+  );
+}
+
+/** One full-width color row: swatch, name, what it paints, and a hex input unless the color is read-only. */
+function ColorRow({ theme, name, hint, color, text, bad, accent, onText }: { theme: PluginTheme; name: string; hint: string; color: string; text?: string; bad?: boolean; accent?: boolean; onText?(v: string): void }) {
+  const s = useStyles(theme);
+  const c = theme.colors;
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 12, padding: 10, borderRadius: 10, backgroundColor: c.surface1, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border }}>
+      <View style={{ width: 28, height: 28, borderRadius: 6, backgroundColor: color, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border }} />
+      <View style={{ flex: 1, gap: 1 }}>
+        <Text {...PMONO} style={[s.code, { fontSize: 12, color: c.foreground }]}>{name}</Text>
+        <Text style={[s.small, { fontSize: 12 }]}>{hint}</Text>
+      </View>
+      {onText ? (
+        <TextInput
+          accessibilityLabel={`${name} hex color`}
+          value={text}
+          autoCapitalize="none"
+          autoCorrect={false}
+          placeholder="#rrggbb"
+          onChangeText={onText}
+          {...PMONO}
+          style={[input(s, c), s.code, { width: 104, paddingVertical: 6, color: c.foreground, borderColor: bad ? c.statusDanger : accent ? c.accent : c.border }]}
+        />
+      ) : null}
+    </View>
+  );
+}
+
+const normalize = (v: string) => (v.trim().startsWith("#") ? v.trim() : `#${v.trim()}`);
+
+interface EditorProps {
+  theme: PluginTheme;
+  draft: ThemeDraft;
+  /** What the tiles and preview show: the draft, or the Paseo theme being looked at. */
+  shown: ThemeDraft;
+  view: string | undefined;
+  /** The app theme in use: a Paseo theme id, "plugin" for this plugin's, or "other". */
+  appId: string;
+  /** The plugin theme as saved, which is what "plugin" applies. */
+  saved: ThemeDraft | undefined;
+  typo: Typography;
+  setDraft(d: ThemeDraft): void;
+  setView(id: string | undefined): void;
+  setTypo(t: Typography): void;
+}
+
+function Editor({ theme, draft, shown, view, appId, saved, typo, setDraft, setView, setTypo }: EditorProps) {
+  const s = useStyles(theme);
+  const c = theme.colors;
+  const locked = !!view;
+  // Hex text being typed; only valid values reach the draft.
+  const [typing, setTyping] = useState<Partial<Record<Token | "sidebar", string>>>({});
+  const [token, setToken] = useState<Token>("raised");
+  useEffect(() => setTyping({}), [draft.colors, draft.sidebar]);
+  const presetOf = (d: ThemeDraft) => PRESETS.find((p) => sameColors(p.colors, d.colors) && (p.sidebar ?? "") === d.sidebar && p.syntax === d.syntax)?.id;
+  const selected = locked ? undefined : presetOf(draft);
+  const inUse = appId === "plugin" && saved ? presetOf(saved) : undefined;
+  const tokenText = typing[token] ?? draft.colors[token];
+  const sidebarText = typing.sidebar ?? draft.sidebar;
+  const sidebarBad = !!typing.sidebar && !isHex(normalize(typing.sidebar));
+  const sub = (title: string, hint: string) => (
+    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+      <Text style={[s.verb, { fontSize: 13 }]}>{title}</Text>
+      <Text style={[s.small, { fontSize: 12 }]}>{hint}</Text>
+    </View>
+  );
+  const grid = (tokens: Token[]) => (
+    <Grid n={4}>
+      {tokens.map((t) => (
+        <ColorTile key={t} theme={theme} token={t} draft={shown} selected={!locked && t === token} onPress={locked ? undefined : () => setToken(t)} />
+      ))}
+    </Grid>
+  );
+  return (
+    <View style={{ gap: 28 }}>
+      <View style={{ gap: 12 }}>
+        <SectionHead theme={theme} title="App theme" />
+        <View style={{ gap: 8 }}>
+          {sub("Paseo", "built in · read only")}
+          <Grid n={4}>
+            {PASEO_THEMES.map((t) => {
+              const half = (p: PaseoTheme): [string, string, string] => [p.colors.background, p.colors.foreground, p.colors.accent];
+              return <ThemeTile key={t.id} theme={theme} name={t.name} halves={t.id === "auto" ? [half(PASEO_LIGHT), half(PASEO_DARK)] : [half(t)]} selected={view === t.id} active={appId === t.id} onPress={() => setView(t.id)} />;
+            })}
+          </Grid>
+        </View>
+        <View style={{ gap: 8 }}>
+          {sub("Chat Polish", "editable")}
+          <Grid n={4}>
+            {[
+              ...PRESETS.map((p) => (
+                <ThemeTile
+                  key={p.id}
+                  theme={theme}
+                  name={p.name.replace("One Dark Darker ", "")}
+                  halves={[[p.colors.background, p.colors.foreground, p.colors.accent]]}
+                  selected={p.id === selected}
+                  active={p.id === inUse}
+                  onPress={() => {
+                    setView(undefined);
+                    setDraft({ name: p.name, appearance: p.appearance, colors: { ...p.colors }, sidebar: p.sidebar ?? "", syntax: p.syntax });
+                  }}
+                />
+              )),
+              <Pressable
+                key="new"
+                accessibilityRole="button"
+                accessibilityLabel="New theme from current colors"
+                onPress={() => {
+                  setView(undefined);
+                  setDraft({ ...shown, name: "Custom theme" });
+                }}
+                style={{ flex: 1, minHeight: 72, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, alignItems: "center", justifyContent: "center", gap: 4 }}
+              >
+                <Icon name="Plus" size={15} color={c.foregroundMuted} />
+                <Text style={[s.small, { fontSize: 12 }]}>New theme</Text>
+              </Pressable>,
+            ]}
+          </Grid>
+        </View>
+        {locked ? null : (
+          <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+            <TextInput accessibilityLabel="Theme name" value={draft.name} onChangeText={(name) => setDraft({ ...draft, name: name || " " })} style={[input(s, c), { flex: 1, backgroundColor: c.surface1, fontSize: 14, color: c.foreground }]} />
+            <Segmented
+              theme={theme}
+              value={draft.appearance}
+              onChange={(appearance) => setDraft({ ...draft, appearance })}
+              options={[
+                ["light", "Sun", "Light"],
+                ["dark", "Moon", "Dark"],
+              ]}
+            />
+          </View>
+        )}
+      </View>
+
+      {canSetAppTheme ? <TypographySection theme={theme} typo={typo} setTypo={setTypo} /> : null}
+
+      {locked ? (
+        <Notice theme={theme} icon="Lock">
+          Built into Paseo, so these colors can't be edited. Customize a copy makes a Chat Polish theme from them.
+        </Notice>
+      ) : null}
+
+      <View style={{ gap: 10 }}>
+        <SectionHead theme={theme} title="Surfaces" hint="back to front" />
+        {grid(SURFACES)}
+      </View>
+      <View style={{ gap: 10 }}>
+        <SectionHead theme={theme} title="Text and accent" hint="contrast on background" />
+        {grid(TEXTS)}
+      </View>
+
+      {canSetAppTheme ? (
+        <View style={{ gap: 10 }}>
+          <SectionHead theme={theme} title="Sidebar" hint="desktop only" />
+          <ColorRow
+            theme={theme}
+            name="sidebar"
+            hint="Empty uses background"
+            color={shown.sidebar || shown.colors.background}
+            text={sidebarText}
+            bad={sidebarBad}
+            onText={
+              locked
+                ? undefined
+                : (v) => {
+                    const t = v.trim();
+                    const next = !t ? "" : normalize(t);
+                    setTyping({ ...typing, sidebar: v });
+                    if (next === "" || isHex(next)) setDraft({ ...draft, sidebar: next.toLowerCase() });
+                  }
+            }
+          />
+        </View>
+      ) : null}
+      {locked ? null : (
+        <ColorRow
+          theme={theme}
+          name={TOKEN_LABEL[token] ?? token}
+          hint={TOKEN_ROLES[token]}
+          color={draft.colors[token]}
+          text={tokenText}
+          bad={!isHex(normalize(tokenText))}
+          accent
+          onText={(v) => {
+            const next = normalize(v);
+            setTyping({ ...typing, [token]: v });
+            if (isHex(next)) setDraft({ ...draft, colors: { ...draft.colors, [token]: next.toLowerCase() } });
+          }}
+        />
+      )}
+      <HighlightTheme theme={theme} draft={draft} shown={shown} setDraft={setDraft} />
+    </View>
+  );
+}
+
+/** Highlight theme for code the plugin draws, as a grid of cards with five of its colors; ones for the other appearance are dimmed. */
+function HighlightTheme({ theme, draft, shown, setDraft }: { theme: PluginTheme; draft: ThemeDraft; shown: ThemeDraft; setDraft(d: ThemeDraft): void }) {
+  const s = useStyles(theme);
+  const c = theme.colors;
+  const options = [...SYNTAX_THEMES, { id: PLAIN_SYNTAX, name: "Plain", appearance: shown.appearance, colors: undefined }];
+  return (
+    <View style={{ gap: 10 }}>
       <SectionHead theme={theme} title="Highlight theme" hint="commands, diffs, JSON" />
-      <View style={{ borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, overflow: "hidden" }}>
-        {options.map((t, i) => {
+      <Grid n={4}>
+        {options.map((t) => {
           const on = t.id === draft.syntax;
-          const fits = t.appearance === draft.appearance;
+          const dots = t.colors ? [t.colors.keyword, t.colors.string, t.colors.number, t.colors.function, t.colors.punctuation] : Array(5).fill(c.foregroundMuted);
           return (
             <Pressable
               key={t.id}
               accessibilityRole="radio"
               accessibilityState={{ checked: on }}
               onPress={() => setDraft({ ...draft, syntax: t.id })}
-              style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 12, paddingVertical: 9, backgroundColor: on ? c.surface2 : undefined, borderTopWidth: i ? StyleSheet.hairlineWidth : 0, borderTopColor: c.border, opacity: fits ? 1 : 0.5 }}
+              style={{ flex: 1, gap: 8, paddingHorizontal: 10, paddingVertical: 9, borderRadius: 8, backgroundColor: on ? c.surface1 : undefined, borderWidth: on ? 1.5 : StyleSheet.hairlineWidth, borderColor: on ? c.accent : c.border, opacity: t.appearance === shown.appearance ? 1 : 0.45 }}
             >
-              <Icon name={on ? "CircleDot" : "Circle"} size={14} color={on ? c.accent : c.foregroundMuted} />
-              <View style={{ flex: 1, gap: 4 }}>
-                <Text style={[s.target, { color: c.foreground, fontSize: 13 }]}>
-                  {t.name}
-                  {fits ? "" : ` · ${t.appearance} themes only`}
-                </Text>
-                <Text numberOfLines={1} style={[s.code, { fontSize: 11, lineHeight: 15, color: draft.colors.foreground, backgroundColor: draft.colors.background, paddingHorizontal: 6, paddingVertical: 3, borderRadius: 4 }]}>
-                  {t.colors
-                    ? highlightShell(SAMPLE_COMMAND).map((sp, j) => (sp.kind ? <Text key={j} style={{ color: t.colors![sp.kind] }}>{sp.text}</Text> : sp.text))
-                    : SAMPLE_COMMAND}
-                </Text>
+              <View style={{ flexDirection: "row", gap: 4 }}>
+                {dots.map((d, i) => (
+                  <View key={i} style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: d, opacity: t.colors ? 1 : 0.4 }} />
+                ))}
               </View>
+              <Text style={[s.small, { fontSize: 12, color: on ? c.foreground : c.foregroundMuted }]} numberOfLines={1}>
+                {t.name.replace("One Dark Darker ", "")}
+              </Text>
             </Pressable>
           );
         })}
-      </View>
+      </Grid>
     </View>
   );
 }
 
-/** One option row of a bordered group: radio or checkbox, label, one-line hint, and a "Paseo default" tag where it applies. */
-function OptionRow({ theme, kind, on, label, hint, paseo, first, onPress }: { theme: PluginTheme; kind: "radio" | "checkbox"; on: boolean; label: string; hint: string; paseo?: boolean; first: boolean; onPress(): void }) {
+
+const HIDEABLE_LABELS: Record<Hideable, string> = { read: "Reads", search: "Searches", fetch: "Fetches", task: "Tasks" };
+const ICON_LABELS: Record<IconKind, string> = { steps: "Merged", tool: "Tools", thought: "Thoughts" };
+
+/** Titles and tile labels for each rich text variant, from the "Rich Text — Style Variants" design. */
+const RICH_TEXT_OPTIONS: Record<RichText, { title: string; options: string[] }> = {
+  quote: { title: "Blockquote", options: ["Accent bar", "Tinted card", "Italic indent"] },
+  table: { title: "Table", options: ["Bordered", "Striped", "Minimal", "Grid"] },
+  code: { title: "Code block", options: ["Header bar", "Bare", "Gutter"] },
+  inline: { title: "Inline code", options: ["Filled chip", "Tinted text", "Outlined"] },
+  heading: { title: "Headings", options: ["Size scale", "Compact + rule", "Accent marker"] },
+  list: { title: "Lists", options: ["Bullets + squares", "Dashes + circles", "Timeline rows"] },
+  callout: { title: "Callouts", options: ["Tinted card", "Side bar", "Inline row"] },
+  rule: { title: "Horizontal rule", options: ["Hairline", "Spaced dots", "Short inset"] },
+};
+
+
+const LOADER_LABELS: Record<Loader, string> = { dots: "Dots", sparkle: "Sparkle", spokes: "Spokes", dotring: "Dot ring", orb: "Orb", matrix: "Matrix", snake: "Snake" };
+
+/** One loader running for real: the timeline's overlay (css in web.ts) scoped to this tile instead of the whole page. */
+function LoaderTile({ theme, id, on, onPress }: { theme: PluginTheme; id: Loader; on: boolean; onPress(): void }) {
   const s = useStyles(theme);
   const c = theme.colors;
-  const icon = kind === "radio" ? (on ? "CircleDot" : "Circle") : on ? "SquareCheck" : "Square";
+  const vars = { "--cp-fg": c.foreground, "--cp-accent": c.accent, "--cp-mono": "ui-monospace, Menlo, monospace" } as CSSProperties;
+  const dot = 10 / 3;
+  const box: CSSProperties = { position: "relative", width: 14, height: 14, transform: "scale(1.7)", ...vars };
   return (
     <Pressable
-      accessibilityRole={kind}
+      accessibilityRole="radio"
+      accessibilityLabel={LOADER_LABELS[id]}
       accessibilityState={{ checked: on }}
       onPress={onPress}
-      style={({ pressed }) => ({ flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14, paddingVertical: 10, backgroundColor: kind === "radio" && on ? c.surface1 : pressed ? alpha(c.surface1, 0.6) : undefined, borderTopWidth: first ? 0 : StyleSheet.hairlineWidth, borderTopColor: c.border })}
+      style={{ flex: 1, alignItems: "center", gap: 10, paddingTop: 16, paddingBottom: 9, borderRadius: 8, backgroundColor: c.surface0, borderWidth: on ? 1.5 : StyleSheet.hairlineWidth, borderColor: on ? c.accent : c.border }}
     >
-      <Icon name={icon} size={15} color={on ? c.accent : c.foregroundMuted} />
-      <View style={{ flex: 1, gap: 2 }}>
-        <Text style={[s.target, { color: c.foreground, fontSize: 14 }]}>{label}</Text>
-        <Text style={[s.small, { fontSize: 12 }]}>{hint}</Text>
-      </View>
-      {paseo ? <Badge theme={theme} label="Paseo default" /> : null}
+      {id === "dots" ? (
+        <div data-cp-dots="" style={{ ...box, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ position: "relative", width: dot * 2 + 2, height: 14 }}>
+            {[0, 1, 2, 3, 4, 5].map((i) => (
+              <div key={i} style={{ position: "absolute", left: (i % 2) * (dot + 2), top: Math.floor(i / 2) * (dot + 2), width: dot, height: dot, borderRadius: "50%", background: c.foreground, opacity: 0.6 }} />
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div style={box}>
+          <div data-cp-loader="" data-cp-tile={id}>
+            {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
+              <i key={i} />
+            ))}
+          </div>
+        </div>
+      )}
+      <Text style={[s.small, { fontSize: 12, color: on ? c.foreground : c.foregroundMuted }]}>{LOADER_LABELS[id]}</Text>
     </Pressable>
   );
 }
 
-const group = (c: PluginTheme["colors"]) => ({ borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, overflow: "hidden" as const });
+type Colors = PluginTheme["colors"];
+const bar = (w: DimensionValue, color: string, h = 3, key?: number) => <View key={key} style={{ width: w, height: h, borderRadius: 2, backgroundColor: color }} />;
+const col = (...kids: ReactNode[]) => <View style={{ gap: 4 }}>{kids}</View>;
+const line = (c: Colors, w: DimensionValue = 70) => <View style={{ width: w, height: 1, backgroundColor: c.border }} />;
+const KEYWORD = "#c594c5";
+const FUNCTION = "#5fb3b3";
 
-/** A radio list; the fourth entry marks the option that leaves things as Paseo has them. */
-function Choice<T extends string>({ theme, value, options, onChange }: { theme: PluginTheme; value: T; options: Array<[T, string, string, boolean?]>; onChange(v: T): void }) {
-  return (
-    <View style={group(theme.colors)}>
-      {options.map(([id, label, hint, paseo], i) => (
-        <OptionRow key={id} theme={theme} kind="radio" on={id === value} label={label} hint={hint} paseo={paseo} first={!i} onPress={() => onChange(id)} />
-      ))}
-    </View>
-  );
-}
-
-const HIDEABLE_LABELS: Record<Hideable, [string, string]> = {
-  read: ["Reads", "Read file rows"],
-  search: ["Searches", "Code and web searches"],
-  fetch: ["Fetches", "Fetched web pages"],
-  task: ["Background tasks", "Finished background task notices"],
+/** A small drawing of each style variant, in the order of RICH_TEXT_OPTIONS. */
+const RICH_DRAWINGS: Record<RichText, Array<(c: Colors) => ReactNode>> = {
+  quote: [
+    (c) => (
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <View style={{ width: 2, height: 24, backgroundColor: c.accent }} />
+        {col(bar(56, c.foregroundMuted), bar(38, c.foregroundMuted))}
+      </View>
+    ),
+    (c) => (
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, padding: 8, borderRadius: 5, backgroundColor: c.surface2 }}>
+        <Icon name="Quote" size={9} color={c.foregroundMuted} />
+        {col(bar(40, c.foregroundMuted), bar(28, c.foregroundMuted))}
+      </View>
+    ),
+    (c) => <View style={{ paddingLeft: 14 }}>{col(bar(56, c.foregroundMuted), bar(38, c.foregroundMuted))}</View>,
+  ],
+  table: [
+    (c) => (
+      <View style={{ alignSelf: "stretch", borderRadius: 4, borderWidth: 1, borderColor: c.border, overflow: "hidden" }}>
+        <View style={{ height: 9, backgroundColor: c.surface2, borderBottomWidth: 1, borderBottomColor: c.border }} />
+        <View style={{ height: 9, borderBottomWidth: 1, borderBottomColor: c.border }} />
+        <View style={{ height: 9 }} />
+      </View>
+    ),
+    (c) => (
+      <View style={{ alignSelf: "stretch", gap: 2 }}>
+        {[c.surface2, undefined, c.surface2].map((bg, i) => (
+          <View key={i} style={{ height: 8, borderRadius: 2, backgroundColor: bg }} />
+        ))}
+      </View>
+    ),
+    (c) => line(c, 66),
+    (c) => (
+      <View style={{ alignSelf: "stretch", height: 28, borderRadius: 4, borderWidth: 1, borderColor: c.border, flexDirection: "row" }}>
+        <View style={{ flex: 1, borderRightWidth: 1, borderRightColor: c.border }} />
+        <View style={{ flex: 1, borderRightWidth: 1, borderRightColor: c.border }} />
+        <View style={{ flex: 1 }} />
+      </View>
+    ),
+  ],
+  code: [
+    (c) => (
+      <View style={{ width: 76, borderRadius: 4, borderWidth: 1, borderColor: c.border, overflow: "hidden" }}>
+        <View style={{ height: 7, backgroundColor: c.surface2 }} />
+        <View style={{ padding: 6, gap: 3 }}>
+          {bar(40, KEYWORD)}
+          {bar(28, FUNCTION)}
+        </View>
+      </View>
+    ),
+    (c) => (
+      <View style={{ width: 76, padding: 7, gap: 3, borderRadius: 4, backgroundColor: sunken(c.surface0) }}>
+        {bar(44, KEYWORD)}
+        {bar(30, FUNCTION)}
+      </View>
+    ),
+    (c) => (
+      <View style={{ width: 76, flexDirection: "row", gap: 6, padding: 7, borderRadius: 4, borderWidth: 1, borderColor: c.border }}>
+        {col(bar(3, c.foregroundMuted), bar(3, c.foregroundMuted))}
+        {col(bar(40, KEYWORD), bar(28, FUNCTION))}
+      </View>
+    ),
+  ],
+  inline: [
+    (c) => (
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+        {bar(12, c.foregroundMuted)}
+        <View style={{ padding: 3, borderRadius: 3, backgroundColor: c.surface2 }}>{bar(14, c.foregroundMuted)}</View>
+        {bar(10, c.foregroundMuted)}
+      </View>
+    ),
+    (c) => (
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+        {bar(12, c.foregroundMuted)}
+        {bar(18, c.statusWarning)}
+        {bar(10, c.foregroundMuted)}
+      </View>
+    ),
+    (c) => (
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+        {bar(12, c.foregroundMuted)}
+        <View style={{ padding: 3, borderRadius: 3, borderWidth: 1, borderColor: c.border }}>{bar(14, c.foreground)}</View>
+        {bar(10, c.foregroundMuted)}
+      </View>
+    ),
+  ],
+  heading: [
+    (c) => col(bar(46, c.foreground, 6), bar(30, c.foregroundMuted, 4)),
+    (c) => (
+      <View style={{ gap: 4 }}>
+        {bar(34, c.foreground, 5)}
+        {bar(24, c.foregroundMuted, 3)}
+        {line(c, 62)}
+      </View>
+    ),
+    (c) => (
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+        <View style={{ width: 2, height: 14, backgroundColor: c.accent }} />
+        {bar(40, c.foreground, 6)}
+      </View>
+    ),
+  ],
+  list: [
+    (c) => (
+      <View style={{ gap: 4 }}>
+        {[c.foregroundMuted, c.foregroundMuted, c.statusSuccess].map((m, i) => (
+          <View key={i} style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+            <View style={{ width: 4, height: 4, borderRadius: i === 2 ? 1 : 2, backgroundColor: m }} />
+            {bar(i === 1 ? 26 : 38, c.foregroundMuted)}
+          </View>
+        ))}
+      </View>
+    ),
+    (c) => (
+      <View style={{ gap: 4 }}>
+        {[0, 1, 2].map((i) => (
+          <View key={i} style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+            {i === 2 ? <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: c.statusSuccess }} /> : bar(5, c.foregroundMuted, 1)}
+            {bar(i === 1 ? 26 : 38, c.foregroundMuted)}
+          </View>
+        ))}
+      </View>
+    ),
+    (c) => (
+      <View style={{ gap: 3 }}>
+        {[0, 1, 2].map((i) => (
+          <View key={i} style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+            <View style={{ width: 3, height: 3, borderRadius: 2, backgroundColor: c.foregroundMuted }} />
+            {bar(i === 1 ? 30 : 42, c.foregroundMuted, i === 2 ? 2 : 3)}
+          </View>
+        ))}
+      </View>
+    ),
+  ],
+  callout: [
+    (c) => (
+      <View style={{ width: 76, flexDirection: "row", alignItems: "center", gap: 6, padding: 7, borderRadius: 5, backgroundColor: alpha(c.accent, 0.14), borderWidth: 1, borderColor: alpha(c.accent, 0.35) }}>
+        <Icon name="Info" size={9} color={c.accent} />
+        {col(bar(28, c.foregroundMuted), bar(20, c.foregroundMuted))}
+      </View>
+    ),
+    (c) => (
+      <View style={{ flexDirection: "row", gap: 6 }}>
+        <View style={{ width: 2, height: 18, backgroundColor: c.accent }} />
+        {col(bar(22, c.accent), bar(44, c.foregroundMuted))}
+      </View>
+    ),
+    (c) => (
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+        <Icon name="Info" size={9} color={c.accent} />
+        {bar(12, c.accent)}
+        {bar(34, c.foregroundMuted)}
+      </View>
+    ),
+  ],
+  rule: [
+    (c) => line(c),
+    (c) => (
+      <View style={{ flexDirection: "row", gap: 6 }}>
+        {[0, 1, 2].map((i) => (
+          <View key={i} style={{ width: 3, height: 3, borderRadius: 2, backgroundColor: c.foregroundMuted }} />
+        ))}
+      </View>
+    ),
+    (c) => <View style={{ width: 70 }}>{line(c, 24)}</View>,
+  ],
 };
 
-const LOADER_OPTIONS: Array<[Loader, string, string, boolean?]> = [
-  ["dots", "Dots", "Paseo's 2 × 3 grid, chasing smoothly", true],
-  ["sparkle", "Sparkle", "A star that grows · ✢ ✳ ✶ ✻ ✽ and back, in the accent color"],
-  ["spokes", "Spokes", "Eight spokes with a fading tail, like macOS"],
-  ["dotring", "Dot ring", "Eight dots round a circle with a fading tail"],
-  ["orb", "Orb", "A soft accent orb that breathes and glows"],
-  ["matrix", "Matrix ripple", "A 3 × 3 dot grid, rippling out from the center"],
-  ["snake", "Snake", "A dot snake winding through a 3 × 3 grid"],
-];
-
-const ICON_LABELS: Record<IconKind, [string, string]> = {
-  steps: ["Merged rows", "A list-tree icon before “Thought 2 times, ran 3 commands”"],
-  tool: ["Tool calls", "A terminal, pencil, eye or wrench per tool"],
-  thought: ["Thoughts", "A brain before Thinking and Thought"],
-};
-
-/** Labels and hints for each rich text variant, from the "Rich Text — Style Variants" design. */
-const RICH_TEXT_OPTIONS: Record<RichText, { title: string; description: string; options: Array<[string, string]> }> = {
-  quote: { title: "Blockquote", description: "Quoted text (> …).", options: [["Accent bar", "2px accent rule, muted italic text"], ["Tinted card", "Raised fill with a quote mark; reads as an aside"], ["Italic indent", "No rule, just indented italic text"]] },
-  table: { title: "Table", description: "Markdown tables.", options: [["Bordered", "Outer hairline and a raised header row"], ["Striped", "No borders; alternating raised rows"], ["Minimal", "Header rule only; lightest for small tables"], ["Grid", "Bordered plus a hairline between columns"]] },
-  code: { title: "Code block", description: "Fenced code. The language shows when the fence names one (```ts).", options: [["Header bar", "Language and copy in a strip over the code"], ["Bare", "Sunken fill, no frame; language and copy float top-right"], ["Gutter", "Line numbers and a hairline frame, no fill"]] },
-  inline: { title: "Inline code", description: "`code` inside prose.", options: [["Filled chip", "Control fill, radius 4"], ["Tinted text", "No box; mono in the warning color"], ["Outlined", "Hairline border, no fill"]] },
-  heading: { title: "Headings", description: "# to ### in replies.", options: [["Size scale", "24 / 20 / 16, all semibold"], ["Compact + rule", "18 / 15 / 12 caps; H1 gets a hairline"], ["Accent marker", "Accent bar on H1 and H2, a muted ### on H3"]] },
-  list: { title: "Lists and task lists", description: "Bullets, numbers and [x] tasks.", options: [["Bullets + squares", "Dots, mono numbers, filled square checks"], ["Dashes + circles", "En dashes, 1) numbers, round green checks"], ["Timeline rows", "Small dots, tight rows, done tasks muted"]] },
-  callout: { title: "Callouts", description: "> [!NOTE], [!WARNING] and [!TIP] quotes.", options: [["Tinted card", "Tinted fill with an icon and title; most visible"], ["Side bar", "Colored rule and a small-caps label"], ["Inline row", "Icon and label inline with the text"]] },
-  rule: { title: "Horizontal rule", description: "--- between sections.", options: [["Hairline", "Full-width 1px line"], ["Spaced dots", "Three muted dots, centered"], ["Short inset", "A 48px line, left-aligned"]] },
-};
-
+/** Settings for one page: grouped cards (Messages, Steps) or a tile picker per markdown element (Rich text). */
 function PrefsEditor({ theme, page, prefs, onChange }: { theme: PluginTheme; page: Exclude<Page, "theme">; prefs: Prefs; onChange(p: Prefs): void }) {
   const set = <K extends keyof Prefs>(key: K) => (value: Prefs[K]) => onChange({ ...prefs, [key]: value });
-  const st = useStyles(theme);
+  const s = useStyles(theme);
+  const c = theme.colors;
   if (page === "messages") {
     const paseoSyntax = readSyntaxTheme();
     return (
-      <View style={{ gap: 20 }}>
-        <Section theme={theme} first title="User messages" description="Messages longer than 8 lines." desktop={canSetAppTheme}>
-          <Choice
-            theme={theme}
-            value={prefs.userMessages}
-            onChange={set("userMessages")}
-            options={[
-              ["clamp", "Clamp long messages", "Six lines with a fade; click the bubble to open"],
-              ["full", "Show in full", "Every line, always", true],
-            ]}
-          />
-        </Section>
-        <Section theme={theme} title="Steps between replies" description="Thoughts and tool calls the agent makes before it answers.">
-          <Choice
-            theme={theme}
-            value={prefs.merge}
-            onChange={set("merge")}
-            options={[
-              ["on", "Merge into one row", "“Thought 2 times, ran 3 commands” · open it to see each step"],
-              ["off", "One row per step", "Paseo still groups tool calls in summary mode", true],
-            ]}
-          />
-        </Section>
-        <Section theme={theme} title="Row icons" description="The icon at the start of each kind of row. Without it, a row starts with its verb and a failed step's verb turns red.">
-          <View style={group(theme.colors)}>
-            {ICON_KINDS.map((k, i) => {
-              const shown = prefs.rowIcons[k] === "show";
-              return (
-                <OptionRow
-                  key={k}
-                  theme={theme}
-                  kind="checkbox"
-                  on={shown}
-                  label={ICON_LABELS[k][0]}
-                  hint={ICON_LABELS[k][1]}
-                  first={!i}
-                  onPress={() => onChange({ ...prefs, rowIcons: { ...prefs.rowIcons, [k]: shown ? "hide" : "show" } })}
-                />
-              );
-            })}
-          </View>
-        </Section>
-        <Section theme={theme} title="Thoughts and tool calls" description="How loud the rows between replies are.">
-          <Choice
-            theme={theme}
-            value={prefs.steps}
-            onChange={set("steps")}
-            options={[
-              ["faded", "Faded", "Rows sit back until you hover or open them"],
-              ["full", "Full strength", "As loud as the reply", true],
-            ]}
-          />
-        </Section>
-        {canSetAppTheme ? (
-          <Section theme={theme} title="Paseo's own items" description="Tool call groups, bubbles, headings, lists, quotes, tables and code blocks." desktop>
-            <Choice
+      <View style={{ gap: 24 }}>
+        <Group theme={theme} title="Your messages">
+          <Row theme={theme} first label="Long messages" hint="Over 8 lines; clamp shows six.">
+            <Segmented
               theme={theme}
-              value={prefs.nativeStyle}
-              onChange={set("nativeStyle")}
+              value={prefs.userMessages}
+              onChange={set("userMessages")}
               options={[
-                ["design", "Match the design", "Restyle them to the Chat Polish design"],
-                ["paseo", "Leave untouched", "Draw them the way Paseo does", true],
+                ["clamp", "", "Clamp"],
+                ["full", "", "Full", true],
               ]}
             />
-          </Section>
-        ) : null}
+          </Row>
+        </Group>
+        <Group theme={theme} title="Images">
+          <Row theme={theme} first label="Image-only replies" hint="Thumbnails open full size.">
+            <Segmented
+              theme={theme}
+              value={prefs.images}
+              onChange={set("images")}
+              options={[
+                ["small", "", "Small"],
+                ["large", "", "Large"],
+                ["native", "", "Inline", true],
+              ]}
+            />
+          </Row>
+        </Group>
         {canSetAppTheme ? (
-          <Section theme={theme} title="Working indicator" description="The loader in the turn footer while the agent works. Needs Paseo's own items to match the design." desktop>
-            <Choice theme={theme} value={prefs.loader} onChange={set("loader")} options={LOADER_OPTIONS} />
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-              <Text style={[st.small, { fontSize: 13 }]}>Size</Text>
+          <Group theme={theme} title="Working indicator">
+            <Row theme={theme} first stacked label="Loader" hint="Shown in the turn footer while the agent works.">
+              {prefs.nativeStyle === "paseo" ? (
+                <Notice theme={theme}>Loaders are drawn by the restyle. Turn on Restyle Paseo's items to pick one.</Notice>
+              ) : (
+                <View style={{ width: "100%" }}>
+                  <Grid n={4}>
+                    {LOADERS.map((id) => (
+                      <LoaderTile key={id} theme={theme} id={id} on={prefs.loader === id} onPress={() => set("loader")(id)} />
+                    ))}
+                  </Grid>
+                </View>
+              )}
+            </Row>
+            <Row theme={theme} label="Size" hint="Paseo draws it at 14.">
               <Segmented
                 theme={theme}
                 value={prefs.loaderSize}
                 onChange={set("loaderSize")}
                 options={[
-                  ["s", "Minus", "14 · Paseo"],
-                  ["m", "Equal", "16"],
-                  ["l", "Plus", "18"],
+                  ["s", "", "14", true],
+                  ["m", "", "16"],
+                  ["l", "", "18"],
                 ]}
               />
-            </View>
-          </Section>
+            </Row>
+          </Group>
         ) : null}
-        <Section theme={theme} title="Images" description="Replies that only contain images.">
-          <Choice
-            theme={theme}
-            value={prefs.images}
-            onChange={set("images")}
-            options={[
-              ["small", "Small thumbnails", "200 × 128 · click to open full size"],
-              ["large", "Large thumbnails", "320 × 200 · click to open full size"],
-              ["native", "Full size inline", "Images at their own size", true],
-            ]}
-          />
-        </Section>
-        <Section theme={theme} title="Text and code" description="Drawn by Paseo. Fonts and sizes follow Settings → Appearance.">
-          {paseoSyntax ? (
-            <Notice theme={theme} action={paseoSyntax === "one" ? null : <Button theme={theme} label="Use One" icon="Code" onPress={() => updateAppSettings({ syntaxTheme: "one" })} />}>
-              {paseoSyntax === "one"
-                ? "Code blocks use Paseo's One syntax theme, the closest match to Mariana."
-                : `Code blocks use Paseo's ${paseoSyntax} syntax theme. One Dark is the closest match to Mariana.`}
-            </Notice>
-          ) : (
-            <Notice theme={theme}>Text, tables, code blocks and mermaid diagrams render natively.</Notice>
-          )}
-        </Section>
+        {paseoSyntax ? (
+          <Notice theme={theme} action={paseoSyntax === "one" ? null : <Button theme={theme} label="Use One" icon="Code" onPress={() => updateAppSettings({ syntaxTheme: "one" })} />}>
+            {paseoSyntax === "one"
+              ? "Text and code follow Settings → Appearance. Code uses Paseo's One syntax theme."
+              : `Text and code follow Settings → Appearance. Code uses Paseo's ${paseoSyntax} syntax theme; One is the closest match to Mariana.`}
+          </Notice>
+        ) : (
+          <Notice theme={theme}>Text, tables, code blocks and mermaid diagrams render natively.</Notice>
+        )}
+        <Legend theme={theme} />
       </View>
     );
   }
-  if (page === "rich") {
-    return (
-      <View style={{ gap: 20 }}>
-        {prefs.nativeStyle === "paseo" ? <Notice theme={theme}>Paseo's own items are left untouched (Messages page), so these styles don't apply until you switch that back.</Notice> : null}
-        {RICH_TEXT.map((k, i) => (
-          <Section key={k} theme={theme} first={!i && prefs.nativeStyle !== "paseo"} title={RICH_TEXT_OPTIONS[k].title} description={RICH_TEXT_OPTIONS[k].description} desktop>
-            <Choice
-              theme={theme}
-              value={prefs.richText[k]}
-              onChange={(v) => onChange({ ...prefs, richText: { ...prefs.richText, [k]: v } })}
-              options={RICH_TEXT_OPTIONS[k].options.map(([label, hint], j) => [(["a", "b", "c", "d"] as const)[j]!, label, hint])}
-            />
-          </Section>
-        ))}
-      </View>
-    );
-  }
-  if (page === "reasoning") {
+  if (page === "steps") {
     const paseo = readHostAppearance().autoExpandReasoning;
     return (
-      <Section theme={theme} first title="Default state" description="How reasoning rows start when they appear.">
-        <Choice
+      <View style={{ gap: 24 }}>
+        <Group theme={theme} title="Layout">
+          <Row theme={theme} first label="Merge into one row" hint="One row like “Thought 2 times, ran 3 commands”.">
+            <Switch theme={theme} label="Merge into one row" value={prefs.merge === "on"} onChange={(on) => set("merge")(on ? "on" : "off")} />
+          </Row>
+          <Row theme={theme} label="Strength" hint="Faded rows sit back until you hover them.">
+            <Segmented
+              theme={theme}
+              value={prefs.steps}
+              onChange={set("steps")}
+              options={[
+                ["faded", "", "Faded"],
+                ["full", "", "Full", true],
+              ]}
+            />
+          </Row>
+          <Row theme={theme} stacked label="Row icons" hint="Without an icon a row starts with its verb.">
+            {ICON_KINDS.map((k) => {
+              const shown = prefs.rowIcons[k] === "show";
+              return <Chip key={k} theme={theme} on={shown} label={ICON_LABELS[k]} onPress={() => onChange({ ...prefs, rowIcons: { ...prefs.rowIcons, [k]: shown ? "hide" : "show" } })} />;
+            })}
+          </Row>
+        </Group>
+        <Group theme={theme} title="Reasoning">
+          <Row theme={theme} first stacked label="Starts as" hint={`Paseo: Always expand reasoning (${paseo ? "on" : "off"}).`}>
+            <Segmented
+              theme={theme}
+              value={prefs.reasoning}
+              onChange={set("reasoning")}
+              options={[
+                ["paseo", "", "Paseo", true],
+                ["collapsed", "", "Collapsed"],
+                ["expanded", "", "Expanded"],
+              ]}
+            />
+          </Row>
+        </Group>
+        <Group
           theme={theme}
-          value={prefs.reasoning}
-          onChange={set("reasoning")}
-          options={[
-            ["paseo", "Follow Paseo", `Settings → Appearance → Always expand reasoning (${paseo ? "on" : "off"})`, true],
-            ["collapsed", "Collapsed", "A quiet Thought row, click to read"],
-            ["expanded", "Expanded", "Show the full reasoning"],
-          ]}
-        />
-      </Section>
+          title="Tool calls"
+          top={
+            readHostAppearance().toolCallDetail === "overview" ? (
+              <Notice theme={theme}>Paseo's tool call display is Summary, so calls stay grouped ("Ran 4 commands"). Switch it to Detailed in Settings → Appearance to get these rows.</Notice>
+            ) : null
+          }
+        >
+          <Row theme={theme} first label="Open details" hint="Which rows start open.">
+            <Segmented
+              theme={theme}
+              value={prefs.toolDetails}
+              onChange={set("toolDetails")}
+              options={[
+                ["collapsed", "", "None", true],
+                ["failed", "", "Failures"],
+                ["expanded", "", "All"],
+              ]}
+            />
+          </Row>
+          <Row theme={theme} label="Command colors" hint="Colors from the Theme page.">
+            <Segmented
+              theme={theme}
+              value={prefs.commandColors}
+              onChange={set("commandColors")}
+              options={[
+                ["expanded", "", "When open", true],
+                ["always", "", "Always"],
+              ]}
+            />
+          </Row>
+          <Row theme={theme} stacked label="Show in timeline" hint="Running and failed calls always show.">
+            {HIDEABLE.map((k) => {
+              const shown = !prefs.hidden.includes(k);
+              return <Chip key={k} theme={theme} on={shown} label={HIDEABLE_LABELS[k]} onPress={() => onChange({ ...prefs, hidden: shown ? [...prefs.hidden, k] : prefs.hidden.filter((h) => h !== k) })} />;
+            })}
+          </Row>
+        </Group>
+        <Legend theme={theme} />
+      </View>
     );
   }
   return (
     <View style={{ gap: 20 }}>
-      <Section theme={theme} first title="Details" description="Which rows start with their output or diff open.">
-        {readHostAppearance().toolCallDetail === "overview" ? (
-          <Notice theme={theme}>Paseo's tool call display is Summary, so calls stay grouped ("Ran 4 commands"). Switch it to Detailed in Settings → Appearance to get these rows.</Notice>
-        ) : null}
-        <Choice
-          theme={theme}
-          value={prefs.toolDetails}
-          onChange={set("toolDetails")}
-          options={[
-            ["collapsed", "Collapsed", "Open a row to see its output or diff"],
-            ["failed", "Open failures", "Failed calls start open"],
-            ["expanded", "Expanded", "Every row with details starts open"],
-          ]}
-        />
-      </Section>
-      <Section theme={theme} title="Command colors" description="Highlight theme is chosen on the Theme page.">
-        <Choice
-          theme={theme}
-          value={prefs.commandColors}
-          onChange={set("commandColors")}
-          options={[
-            ["expanded", "Only when expanded", "Collapsed rows stay quiet"],
-            ["always", "Always", "Color every command row"],
-          ]}
-        />
-      </Section>
-      <Section theme={theme} title="Show in timeline" description="Running and failed calls always show.">
-        <View style={group(theme.colors)}>
-          {HIDEABLE.map((k, i) => {
-            const shown = !prefs.hidden.includes(k);
-            return (
-              <OptionRow
-                key={k}
-                theme={theme}
-                kind="checkbox"
-                on={shown}
-                label={HIDEABLE_LABELS[k][0]}
-                hint={HIDEABLE_LABELS[k][1]}
-                first={!i}
-                onPress={() => onChange({ ...prefs, hidden: shown ? [...prefs.hidden, k] : prefs.hidden.filter((h) => h !== k) })}
-              />
-            );
-          })}
+      {prefs.nativeStyle === "paseo" ? <Notice theme={theme}>Restyle Paseo's items is off, so these styles don't apply until you switch it back on.</Notice> : null}
+      {RICH_TEXT.map((k) => (
+        <View key={k} style={{ gap: 8 }}>
+          <Text style={[s.verb, { fontSize: 13 }]}>{RICH_TEXT_OPTIONS[k].title}</Text>
+          <Grid n={k === "table" ? 4 : 3}>
+            {RICH_TEXT_OPTIONS[k].options.map((label, j) => {
+              const id = (["a", "b", "c", "d"] as const)[j]!;
+              const on = prefs.richText[k] === id;
+              return (
+                <Pressable key={id} accessibilityRole="radio" accessibilityLabel={label} accessibilityState={{ checked: on }} onPress={() => onChange({ ...prefs, richText: { ...prefs.richText, [k]: id } })} style={{ flex: 1, gap: 6 }}>
+                  <View style={{ height: 52, paddingHorizontal: 10, justifyContent: "center", alignItems: "flex-start", borderRadius: 8, backgroundColor: c.surface0, borderWidth: on ? 1.5 : StyleSheet.hairlineWidth, borderColor: on ? c.accent : c.border }}>{RICH_DRAWINGS[k][j]!(c)}</View>
+                  <Text style={[s.small, { fontSize: 12, color: on ? c.foreground : c.foregroundMuted, fontWeight: on ? "500" : "400" }]} numberOfLines={1}>
+                    {label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </Grid>
         </View>
-      </Section>
+      ))}
     </View>
   );
 }
@@ -724,15 +1237,28 @@ function PreviewWorking({ theme }: { theme: PluginTheme }) {
 
 type Viewport = "desktop" | "phone";
 
-function PreviewHead({ theme, layout, viewport, setViewport }: { theme: PluginTheme; layout: PluginScreenProps["layout"]; viewport: Viewport; setViewport(v: Viewport): void }) {
+type PreviewMode = "chat" | "code";
+
+function PreviewHead({ theme, layout, viewport, setViewport, hint = "Updates as you change settings", mode }: { theme: PluginTheme; layout: PluginScreenProps["layout"]; viewport: Viewport; setViewport(v: Viewport): void; hint?: string; mode?: { value: PreviewMode; set(m: PreviewMode): void } }) {
   const s = useStyles(theme);
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
       <Text style={[s.title, { fontSize: 13 }]}>Preview</Text>
       <Badge theme={theme} label="Live" tone={theme.colors.statusSuccess} />
       <Text style={[s.small, { flex: 1, fontSize: 12 }]} numberOfLines={1}>
-        Updates as you change settings
+        {hint}
       </Text>
+      {mode ? (
+        <Segmented<PreviewMode>
+          theme={theme}
+          value={mode.value}
+          onChange={mode.set}
+          options={[
+            ["chat", "MessageSquare", "Chat"],
+            ["code", "Code", "Code"],
+          ]}
+        />
+      ) : null}
       {layout.compact ? null : (
         <Segmented<Viewport>
           theme={theme}
@@ -789,8 +1315,33 @@ function MockChat({ theme, layout, viewport, children }: { theme: PluginTheme; l
   );
 }
 
-function Preview({ theme, draft, prefs, layout }: { theme: PluginTheme; draft: ThemeDraft; prefs: Prefs; layout: PluginScreenProps["layout"] }) {
+/** The code a chat shows, drawn by the same rows as the Chat view: an open merged row of sample calls, then a reply with a code block. */
+function CodeView({ theme, layout, viewport, props }: { theme: PluginTheme; layout: PluginScreenProps["layout"]; viewport: Viewport; props: ComponentProps<typeof MergedSteps> }) {
+  const s = useStyles(theme);
+  const c = theme.colors;
+  return (
+    <View style={{ width: viewport === "phone" ? 390 : "100%", alignSelf: "center", gap: 16, padding: layout.compact || viewport === "phone" ? 12 : 20, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, backgroundColor: c.surface0 }}>
+      <MergedSteps {...props} defaultOpen />
+      <Text style={[s.prose, { color: c.foreground }]}>I wrote auth.ts and changed its 401 to 403. The final file:</Text>
+      <View style={s.block}>
+        <View style={[s.blockHead, { alignItems: "center", justifyContent: "space-between" }]}>
+          <Text {...PMONO} style={[s.code, { color: c.foregroundMuted }]}>ts</Text>
+          <Icon name="Copy" size={13} color={c.foregroundMuted} />
+        </View>
+        <View style={s.blockBody}>
+          {CODE_REPLY.map((l, i) => (
+            <CodeLine key={i} text={l} theme={theme} style={s.code} />
+          ))}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+/** The Chat view (or Code view, on the Theme page) of a sample conversation. `theming` previews unapplied fonts. */
+function Preview({ theme, draft, prefs, layout, theming }: { theme: PluginTheme; draft: ThemeDraft; prefs: Prefs; layout: PluginScreenProps["layout"]; theming?: Typography }) {
   const [viewport, setViewport] = useState<Viewport>("desktop");
+  const [mode, setMode] = useState<PreviewMode>("chat");
   const pt = previewTheme(draft, theme);
   const ps = useStyles(pt);
   const pc = pt.colors;
@@ -802,45 +1353,58 @@ function Preview({ theme, draft, prefs, layout }: { theme: PluginTheme; draft: T
   const calls = PREVIEW_CALLS.filter((t) => !prefs.hidden.includes(hideableKind(t)!));
   const tools = calls.map(toolData);
   const thought = "Handlers in routes/ each call verifyToken(); one middleware removes the duplicates.";
+  const { uiFont, monoFont, contentSize, codeSize } = theming ?? {};
+  const fonts = useMemo(() => (theming ? { uiFont: uiFont || undefined, monoFont: monoFont || undefined, contentSize, codeSize } : undefined), [!!theming, uiFont, monoFont, contentSize, codeSize]);
 
   return (
     <PrefsOverride.Provider value={prefs}>
       <SyntaxOverride.Provider value={draft.syntax}>
         <View style={{ gap: 14 }}>
-          <PreviewHead theme={theme} layout={layout} viewport={viewport} setViewport={setViewport} />
-          <MockChat theme={pt} layout={layout} viewport={viewport}>
-            <PreviewBubble theme={pt} clamp={prefs.userMessages === "clamp"} />
-            {prefs.merge === "on" ? (
-              <MergedSteps
-                key={`steps-${remount}`}
-                {...props}
-                item={item(null)}
-                steps={[{ type: "reasoning" as const, text: thought }, ...calls].map((item) => ({ item, phase: "complete" as const }))}
-                ms={41000}
-                growing={false}
-              />
-            ) : (
-              <>
-                <ThoughtItem key={`thought-${remount}`} {...props} item={item({ text: thought, phase: "complete" as const })} />
-                {tools.map((d) => (
-                  <ToolItem key={`${d.verb}-${d.target}-${remount}`} {...props} item={item(d)} />
-                ))}
-              </>
-            )}
-            <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 5, paddingTop: 8 }}>
-              <Text style={[ps.prose, { color: pc.foreground }]}>Done. Auth now lives in</Text>
-              <InlineCode theme={pt} variant={prefs.richText.inline}>
-                requireAuth
-              </InlineCode>
-              <Text style={[ps.prose, { color: pc.foreground }]}>and all 24 tests pass.</Text>
+          <PreviewHead theme={theme} layout={layout} viewport={viewport} setViewport={setViewport} hint={theming ? "Updates as you edit colors and fonts" : undefined} mode={theming ? { value: mode, set: setMode } : undefined} />
+          <AppearanceOverride.Provider value={fonts}>
+            {/* Paseo sets its UI font from this variable on #root; set here, only the preview picks the font up. */}
+            <View style={theming ? ({ "--paseo-ui-font": theming.uiFont || PASEO_FONT_STACKS.ui } as object) : null}>
+              {mode === "code" ? (
+                <PrefsOverride.Provider value={{ ...prefs, toolDetails: "expanded" }}>
+                  <CodeView theme={pt} layout={layout} viewport={viewport} props={{ ...props, item: item(null), steps: CODE_CALLS.map((item) => ({ item, phase: "complete" as const })), ms: 9000, growing: false }} />
+                </PrefsOverride.Provider>
+              ) : (
+                <MockChat theme={pt} layout={layout} viewport={viewport}>
+                  <PreviewBubble theme={pt} clamp={prefs.userMessages === "clamp"} />
+                  {prefs.merge === "on" ? (
+                    <MergedSteps
+                      key={`steps-${remount}`}
+                      {...props}
+                      item={item(null)}
+                      steps={[{ type: "reasoning" as const, text: thought }, ...calls].map((item) => ({ item, phase: "complete" as const }))}
+                      ms={41000}
+                      growing={false}
+                    />
+                  ) : (
+                    <>
+                      <ThoughtItem key={`thought-${remount}`} {...props} item={item({ text: thought, phase: "complete" as const })} />
+                      {tools.map((d) => (
+                        <ToolItem key={`${d.verb}-${d.target}-${remount}`} {...props} item={item(d)} />
+                      ))}
+                    </>
+                  )}
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 5, paddingTop: 8 }}>
+                    <Text style={[ps.prose, { color: pc.foreground }]}>Done. Auth now lives in</Text>
+                    <InlineCode theme={pt} variant={prefs.richText.inline}>
+                      requireAuth
+                    </InlineCode>
+                    <Text style={[ps.prose, { color: pc.foreground }]}>and all 24 tests pass.</Text>
+                  </View>
+                  <PreviewWorking theme={pt} />
+                  {prefs.images === "native" ? (
+                    <Image source={{ uri: PREVIEW_IMAGE }} style={{ width: "100%", aspectRatio: 16 / 10, borderRadius: 8 }} resizeMode="cover" />
+                  ) : (
+                    <ImagesItem {...props} item={item({ images: [{ alt: "Login screen", url: PREVIEW_IMAGE }, { alt: "Settings screen", url: PREVIEW_IMAGE }] })} />
+                  )}
+                </MockChat>
+              )}
             </View>
-            <PreviewWorking theme={pt} />
-            {prefs.images === "native" ? (
-              <Image source={{ uri: PREVIEW_IMAGE }} style={{ width: "100%", aspectRatio: 16 / 10, borderRadius: 8 }} resizeMode="cover" />
-            ) : (
-              <ImagesItem {...props} item={item({ images: [{ alt: "Login screen", url: PREVIEW_IMAGE }, { alt: "Settings screen", url: PREVIEW_IMAGE }] })} />
-            )}
-          </MockChat>
+          </AppearanceOverride.Provider>
         </View>
       </SyntaxOverride.Provider>
     </PrefsOverride.Provider>
@@ -855,7 +1419,7 @@ function InlineCode({ theme, variant, children }: { theme: PluginTheme; variant:
   const box = { a: { backgroundColor: c.surface2 }, b: {}, c: { borderWidth: 1, borderColor: alpha(c.border, 0.6) } }[variant];
   return (
     <View style={[{ paddingHorizontal: variant === "b" ? 0 : 5, paddingVertical: 1, borderRadius: 4 }, box]}>
-      <Text style={[s.code, { color: variant === "b" ? c.statusWarning : c.foreground }]}>{children}</Text>
+      <Text {...PMONO} style={[s.code, { color: variant === "b" ? c.statusWarning : c.foreground }]}>{children}</Text>
     </View>
   );
 }
@@ -884,7 +1448,7 @@ function RichSample({ theme, rt }: { theme: PluginTheme; rt: Prefs["richText"] }
     if (rt.heading === "a") return title;
     return (
       <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-        {level < 3 ? <View style={{ width: 3, alignSelf: "stretch", borderRadius: 2, backgroundColor: c.accent }} /> : <Text style={[s.code, { color: c.foregroundMuted }]}>###</Text>}
+        {level < 3 ? <View style={{ width: 3, alignSelf: "stretch", borderRadius: 2, backgroundColor: c.accent }} /> : <Text {...PMONO} style={[s.code, { color: c.foregroundMuted }]}>###</Text>}
         {title}
       </View>
     );
@@ -937,7 +1501,7 @@ function RichSample({ theme, rt }: { theme: PluginTheme; rt: Prefs["richText"] }
 
   const marker = (ordered: number | undefined) => {
     const text = rt.list === "c" ? "·" : ordered ? (rt.list === "b" ? `${ordered})` : `${ordered}.`) : rt.list === "b" ? "–" : "•";
-    return <Text style={[ordered && rt.list !== "c" ? s.code : s.prose, { width: 20, color: c.foregroundMuted, fontWeight: rt.list === "c" ? "700" : "400" }]}>{text}</Text>;
+    return <Text {...(ordered && rt.list !== "c" ? PMONO : null)} style={[ordered && rt.list !== "c" ? s.code : s.prose, { width: 20, color: c.foregroundMuted, fontWeight: rt.list === "c" ? "700" : "400" }]}>{text}</Text>;
   };
   const listItem = (text: string, ordered?: number, nested?: boolean) => (
     <View key={text} style={{ flexDirection: "row", alignItems: "baseline", paddingLeft: nested ? 22 : 0 }}>
@@ -970,6 +1534,7 @@ function RichSample({ theme, rt }: { theme: PluginTheme; rt: Prefs["richText"] }
     <Text
       key={i}
       numberOfLines={1}
+      {...(head ? null : PMONO)}
       style={[
         head ? s.small : s.code,
         { flex: widths[i], fontSize: head ? 11 : undefined, fontWeight: head ? "600" : undefined, color: head ? c.foregroundMuted : i === 3 && text !== "0" ? c.statusDanger : c.foreground },
@@ -1002,7 +1567,7 @@ function RichSample({ theme, rt }: { theme: PluginTheme; rt: Prefs["richText"] }
       {rt.code === "c" ? (
         <View>
           {SAMPLE_CODE.map((_, i) => (
-            <Text key={i} style={[s.code, { color: c.foregroundMuted, opacity: 0.6, textAlign: "right" }]}>
+            <Text {...PMONO} key={i} style={[s.code, { color: c.foregroundMuted, opacity: 0.6, textAlign: "right" }]}>
               {i + 1}
             </Text>
           ))}
@@ -1010,12 +1575,12 @@ function RichSample({ theme, rt }: { theme: PluginTheme; rt: Prefs["richText"] }
       ) : null}
       <View style={{ flex: 1 }}>
         {SAMPLE_CODE.map((line) => (
-          <Text key={line} style={s.code}>
+          <Text {...PMONO} key={line} style={s.code}>
             {line}
           </Text>
         ))}
       </View>
-      {rt.code === "b" ? <Text style={[s.code, { fontSize: 11, color: alpha(c.foregroundMuted, 0.6) }]}>ts</Text> : null}
+      {rt.code === "b" ? <Text {...PMONO} style={[s.code, { fontSize: 11, color: alpha(c.foregroundMuted, 0.6) }]}>ts</Text> : null}
       {rt.code === "a" ? null : <Icon name="Copy" size={13} color={rt.code === "b" ? alpha(c.foregroundMuted, 0.4) : c.foregroundMuted} />}
     </View>
   );
@@ -1023,7 +1588,7 @@ function RichSample({ theme, rt }: { theme: PluginTheme; rt: Prefs["richText"] }
     <View style={{ borderRadius: 8, backgroundColor: rt.code === "c" ? undefined : sunken(c.surface0), borderWidth: rt.code === "b" ? 0 : 1, borderColor: rule }}>
       {rt.code === "a" ? (
         <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 7, borderBottomWidth: 1, borderBottomColor: rule }}>
-          <Text style={[s.code, { flex: 1, fontSize: 12, color: c.foregroundMuted }]}>typescript</Text>
+          <Text {...PMONO} style={[s.code, { flex: 1, fontSize: 12, color: c.foregroundMuted }]}>typescript</Text>
           <Icon name="Copy" size={13} color={c.foregroundMuted} />
         </View>
       ) : null}
@@ -1117,28 +1682,46 @@ function Columns({ theme, layout, editor, preview }: { theme: PluginTheme; layou
   );
 }
 
+
 function ThemePage({ theme, layout }: Pick<PluginScreenProps, "theme" | "layout">) {
   const s = useStyles(theme);
   const c = theme.colors;
   const prefs = usePrefs();
   const settings = useSettings(themeSettings);
   const saved = settings.status === "ready" ? settings.values : undefined;
+  const host = readHostAppearance();
+  const hostTypo: Typography = { uiFont: host.uiFont ?? "", contentSize: host.contentSize, monoFont: host.monoFont ?? "", codeSize: host.codeSize };
+  // The app theme in use: this plugin's, a Paseo one (unset means Paseo's default, System), or another plugin's.
+  const appId = host.pluginThemeId ? (host.pluginThemeId === THEME_CATALOG_ID ? "plugin" : "other") : (host.theme ?? "auto");
   const [draft, setDraft] = useState<ThemeDraft | undefined>();
+  const [typo, setTypo] = useState(hostTypo);
+  // The Paseo theme on show (read only); a Paseo theme in use starts out shown.
+  const [view, setView] = useState<string | undefined>(PASEO_THEMES.some((t) => t.id === appId) ? appId : undefined);
   useEffect(() => {
     if (saved && !draft) setDraft(saved);
   }, [saved, draft]);
 
-  const dirty = !!saved && !!draft && JSON.stringify(saved) !== JSON.stringify(draft);
-  const active = readHostAppearance().pluginThemeId === THEME_CATALOG_ID;
-  const apply = async () => {
-    if (!draft || settings.status !== "ready") return false;
-    if (!(await settings.save(draft, settings.revision))) return false;
-    registerTheme(draft);
-    return true;
+  const themeDirty = !!saved && !!draft && JSON.stringify(saved) !== JSON.stringify(draft);
+  const typoDirty = JSON.stringify(typo) !== JSON.stringify(hostTypo);
+  const dirty = themeDirty || typoDirty;
+  const active = appId === "plugin";
+  const paseo = PASEO_THEMES.find((t) => t.id === view);
+  const shown = draft && paseo ? paseoDraft(paseo, draft.syntax) : draft;
+  const fonts = { uiFontFamily: typo.uiFont, contentFontSize: typo.contentSize, monoFontFamily: typo.monoFont, codeFontSize: typo.codeSize };
+  // Saves the theme and writes the fonts (and `app` settings) into Paseo's settings, which reloads the app.
+  const apply = async (useAsAppTheme = false) => {
+    if (!draft || settings.status !== "ready") return;
+    if (themeDirty) {
+      if (!(await settings.save(draft, settings.revision))) return;
+      registerTheme(draft);
+    }
+    const typoPatch = typoDirty ? fonts : {};
+    if (useAsAppTheme) setAppTheme(THEME_CATALOG_ID, typoPatch);
+    else if (typoDirty) updateAppSettings(typoPatch);
   };
-  const useAsAppTheme = async () => {
-    if (dirty && !(await apply())) return;
-    setAppTheme(THEME_CATALOG_ID);
+  const reset = () => {
+    if (saved) setDraft(saved);
+    setTypo(hostTypo);
   };
 
   let body: ReactNode;
@@ -1149,32 +1732,62 @@ function ThemePage({ theme, layout }: Pick<PluginScreenProps, "theme" | "layout"
         <Button theme={theme} label="Restore default theme" icon="RotateCcw" onPress={() => void settings.reset()} />
       </View>
     );
-  } else if (!draft) {
+  } else if (!draft || !shown) {
     body = <Text style={[s.small, { padding: 28 }]}>Loading theme…</Text>;
   } else {
     body = (
       <Columns
         theme={theme}
         layout={layout}
-        editor={<Editor theme={theme} draft={draft} setDraft={setDraft} />}
-        preview={<Preview theme={theme} draft={draft} prefs={prefs} layout={layout} />}
+        editor={<Editor theme={theme} draft={draft} shown={shown} view={view} appId={appId} saved={saved} typo={typo} setDraft={setDraft} setView={setView} setTypo={setTypo} />}
+        preview={<Preview theme={theme} draft={shown} prefs={prefs} layout={layout} theming={canSetAppTheme ? typo : undefined} />}
       />
     );
   }
 
-  const subtitle = active
-    ? "This is your Paseo theme. Apply pushes edits to the app."
-    : canSetAppTheme
-      ? "Use as app theme saves your edits and reloads Paseo with this theme."
-      : "Apply, then choose it under Settings → Appearance to use it app-wide.";
+  const subtitle = paseo
+    ? `${paseo.name} is a Paseo theme. Its colors are fixed; customize a copy to change them.`
+    : active
+      ? "This is your Paseo theme. Apply pushes edits to the app."
+      : canSetAppTheme
+        ? "Use as app theme saves your edits and reloads Paseo with this theme."
+        : "Apply, then choose it under Settings → Appearance to use it app-wide.";
   return (
     <>
       <TopBar theme={theme} layout={layout} title="Theme" subtitle={subtitle + (settings.saveError ? ` Save failed: ${String(settings.saveError)}` : "")}>
-        <Button theme={theme} label="Reset" icon="RotateCcw" disabled={!dirty} onPress={() => saved && setDraft(saved)} />
-        {active || !canSetAppTheme ? (
-          <Button theme={theme} label={settings.saving ? "Applying…" : "Apply theme"} icon="Check" primary disabled={!dirty || settings.saving} onPress={() => void apply()} />
+        {paseo && shown ? (
+          <>
+            {dirty ? <Button theme={theme} label="Reset" icon="RotateCcw" onPress={reset} /> : null}
+            {dirty && appId === paseo.id ? <Button theme={theme} label={settings.saving ? "Applying…" : "Apply"} icon="Check" primary disabled={settings.saving} onPress={() => void apply()} /> : null}
+            {appId === paseo.id ? (
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <Icon name="Check" size={14} color={c.foregroundMuted} />
+                <Text style={[s.small, { fontSize: 13 }]}>In use</Text>
+              </View>
+            ) : (
+              <Button theme={theme} label={`Use ${paseo.name}`} icon="Paintbrush" primary onPress={() => updateAppSettings({ theme: paseo.id, ...(typoDirty ? fonts : null) })} />
+            )}
+            <Button
+              theme={theme}
+              label="Customize a copy"
+              icon="Copy"
+              primary={appId === paseo.id && !dirty}
+              disabled={!draft}
+              onPress={() => {
+                setDraft({ ...shown, name: `${paseo.name} copy` });
+                setView(undefined);
+              }}
+            />
+          </>
         ) : (
-          <Button theme={theme} label="Use as app theme" icon="Paintbrush" primary disabled={settings.saving || !draft} onPress={() => void useAsAppTheme()} />
+          <>
+            <Button theme={theme} label="Reset" icon="RotateCcw" disabled={!dirty} onPress={reset} />
+            {active || !canSetAppTheme ? (
+              <Button theme={theme} label={settings.saving ? "Applying…" : "Apply theme"} icon="Check" primary disabled={!dirty || settings.saving} onPress={() => void apply()} />
+            ) : (
+              <Button theme={theme} label="Use as app theme" icon="Paintbrush" primary disabled={settings.saving || !draft} onPress={() => void apply(true)} />
+            )}
+          </>
         )}
       </TopBar>
       {body}
@@ -1183,26 +1796,15 @@ function ThemePage({ theme, layout }: Pick<PluginScreenProps, "theme" | "layout"
 }
 
 const PAGE_SUBTITLES: Record<Exclude<Page, "theme">, string> = {
-  messages: "Long user messages, the steps between replies and their icons, images in replies, and how Paseo draws text and code.",
-  rich: "One style per markdown element in Paseo's replies. A is the base design.",
-  reasoning: "Whether thinking starts open or as a quiet row.",
-  tools: "What tool rows show, and which ones appear at all.",
+  messages: "Your messages, images in replies and the working indicator.",
+  steps: "The thoughts and tool calls between two replies.",
+  rich: "One style per markdown element in replies. Click a tile to switch.",
 };
 
 /** Timeline prefs save as you pick; open chats pick them up for new rows. */
-function PrefsPage({ theme, layout, page }: Pick<PluginScreenProps, "theme" | "layout"> & { page: Exclude<Page, "theme"> }) {
-  const settings = useSettings(prefsSettings);
+function PrefsPage({ theme, layout, page, settings, change }: Pick<PluginScreenProps, "theme" | "layout"> & { page: Exclude<Page, "theme">; settings: ReturnType<typeof usePrefsSettings>["settings"]; change(p: Prefs): void }) {
   const prefs = usePrefs();
   const draft = useCurrentTheme() ?? themeSchema.parse({});
-  const saved = settings.status === "ready" ? settings.values : undefined;
-  // Settings may load after the entry's own fetch failed: trust the stored document.
-  useEffect(() => {
-    if (saved) setPrefs(saved);
-  }, [saved]);
-  const change = (next: Prefs) => {
-    setPrefs(next);
-    if (settings.status === "ready") void settings.save(next, settings.revision);
-  };
   const defaults = prefsSettings.schema.parse({});
   const isDefault = JSON.stringify(prefs) === JSON.stringify(defaults);
   const c = theme.colors;
@@ -1231,18 +1833,40 @@ function PrefsPage({ theme, layout, page }: Pick<PluginScreenProps, "theme" | "l
   );
 }
 
+/** One settings instance for every prefs control in the dashboard, so saves never race on a stale revision. */
+function usePrefsSettings() {
+  const settings = useSettings(prefsSettings);
+  const saved = settings.status === "ready" ? settings.values : undefined;
+  // Settings may load after the entry's own fetch failed: trust the stored document.
+  useEffect(() => {
+    if (saved) setPrefs(saved);
+  }, [saved]);
+  const change = (next: Prefs) => {
+    setPrefs(next);
+    if (settings.status === "ready") void settings.save(next, settings.revision);
+  };
+  return { settings, change };
+}
+
 export function Dashboard({ theme, layout, host }: PluginScreenProps) {
   const [page, setPage] = useState<Page>("theme");
+  const prefs = usePrefs();
+  const { settings, change } = usePrefsSettings();
   return (
     <View style={{ flex: 1, flexDirection: "row", backgroundColor: theme.colors.surface0 }}>
-      {layout.compact ? null : <InnerNav theme={theme} host={host.label} page={page} onSelect={setPage} />}
+      {layout.compact ? null : <InnerNav theme={theme} host={host.label} page={page} prefs={prefs} onSelect={setPage} onPrefs={change} />}
       <View style={{ flex: 1 }}>
         {layout.compact ? (
-          <View style={{ paddingHorizontal: 16, paddingTop: 12, alignItems: "flex-start" }}>
+          <View style={{ paddingHorizontal: 16, paddingTop: 12, gap: 12, alignItems: "flex-start" }}>
             <Segmented<Page> theme={theme} value={page} onChange={setPage} options={PAGES.map((p) => [p.id, p.icon] as [Page, string])} />
+            {canSetAppTheme && page !== "theme" ? (
+              <View style={{ alignSelf: "stretch" }}>
+                <RestyleCard theme={theme} prefs={prefs} onChange={change} />
+              </View>
+            ) : null}
           </View>
         ) : null}
-        {page === "theme" ? <ThemePage theme={theme} layout={layout} /> : <PrefsPage key={page} theme={theme} layout={layout} page={page} />}
+        {page === "theme" ? <ThemePage theme={theme} layout={layout} /> : <PrefsPage key={page} theme={theme} layout={layout} page={page} settings={settings} change={change} />}
       </View>
     </View>
   );

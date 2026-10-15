@@ -5,6 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { AccessibilityInfo, Animated, Easing, Image, LayoutAnimation, Platform, Pressable, StyleSheet, Text, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
 import type { z } from "zod";
 import { readImage } from "../shared/image";
+import type { Recap } from "../shared/recap";
 import type { imagesSchema, noticeSchema, planSchema, thoughtSchema, todoSchema, ToolData, Tone } from "./model";
 import { contrast, isHex } from "../shared/theme";
 import { highlight, highlightShell, highlightShellBlock, SYNTAX_THEMES, type Span, type SyntaxColors } from "./highlight";
@@ -614,6 +615,105 @@ export function ImagesItem({ item, theme }: PluginTimelineItemProps<z.output<typ
       {item.data.images.map((img, i) => (
         <Thumbnail key={i} alt={img.alt} url={img.url} theme={theme} />
       ))}
+    </View>
+  );
+}
+
+const count = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+
+/** GitHub-style diffstat: five squares split between added and removed, at least one for any removal. */
+export function Diffstat({ added, removed, theme }: { added: number; removed: number; theme: PluginTheme }) {
+  const c = theme.colors;
+  const total = added + removed;
+  const plus = total ? Math.round((5 * added) / total) : 0;
+  const minus = total ? Math.min(5 - plus, Math.max(removed ? 1 : 0, Math.round((5 * removed) / total))) : 0;
+  return (
+    <View style={{ flexDirection: "row", gap: 2 }}>
+      {[0, 1, 2, 3, 4].map((i) => (
+        <View key={i} style={{ width: 7, height: 7, borderRadius: 1.5, backgroundColor: i < plus ? c.statusSuccess : i < plus + minus ? c.statusDanger : c.surface2, opacity: i < plus + minus ? 0.85 : 1 }} />
+      ))}
+    </View>
+  );
+}
+
+/** The daemon's recap after a turn, set like the turn footer under it: files with +/− and a diffstat, commands, failures. Opens to the file list. */
+export function RecapItem({ item, theme }: PluginTimelineItemProps<Recap>) {
+  const s = useStyles(theme);
+  const c = theme.colors;
+  const { files, commands, failed } = item.data;
+  const [open, toggle] = useDisclosure(false);
+  const [hovered, setHovered] = useState(false);
+  const added = files.reduce((n, f) => n + f.added, 0);
+  const removed = files.reduce((n, f) => n + f.removed, 0);
+  const text = [s.meta, { marginLeft: 0, fontSize: 12 }];
+  const mono = [s.code, { fontSize: 12, lineHeight: 18 }];
+  const dot = <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: c.statusDanger }} />;
+  const parts: ReactNode[] = [];
+  if (files.length)
+    parts.push(
+      <View key="files" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+        <Text style={[text, { color: c.foreground }]}>{count(files.length, "file")}</Text>
+        {added ? <Text style={[mono, { color: c.statusSuccess }]}>+{added}</Text> : null}
+        {removed ? <Text style={[mono, { color: c.statusDanger }]}>−{removed}</Text> : null}
+        <Diffstat added={added} removed={removed} theme={theme} />
+      </View>,
+    );
+  if (commands) parts.push(<Text key="commands" style={text}>{count(commands, "command")}</Text>);
+  if (failed.length)
+    parts.push(
+      <View key="failed" style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+        {dot}
+        <Text style={[text, { color: c.statusDanger }]}>{failed.length} failed</Text>
+      </View>,
+    );
+  return (
+    <View style={TIGHT}>
+      <Pressable
+        onPress={toggle}
+        onHoverIn={() => setHovered(true)}
+        onHoverOut={() => setHovered(false)}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        style={{ flexDirection: "row", alignItems: "center", gap: 8, minHeight: 26, alignSelf: "flex-start", opacity: hovered || open ? 1 : 0.85 }}
+      >
+        <View style={s.slot}>
+          <Icon name="FileDiff" size={14} color={c.foregroundMuted} />
+        </View>
+        {parts.flatMap((part, i) => (i ? [<Text key={`dot${i}`} style={text}>·</Text>, part] : [part]))}
+        <Icon name={open ? "ChevronDown" : "ChevronRight"} size={12} color={c.foregroundMuted} />
+      </Pressable>
+      {open ? (
+        <FadeIn style={{ paddingLeft: 9, marginTop: 4 }}>
+          <View style={{ borderLeftWidth: 1, borderLeftColor: alpha(c.border, 0.6), paddingLeft: 14, paddingVertical: 2 }}>
+            {files.map((f) => {
+              const cut = f.path.lastIndexOf("/") + 1;
+              return (
+                <View key={f.path} style={{ flexDirection: "row", alignItems: "center", gap: 10, minHeight: 26 }}>
+                  <Text numberOfLines={1} ellipsizeMode="head" style={[mono, { flexShrink: 1 }]} selectable>
+                    <Text style={{ color: c.foregroundMuted }}>{f.path.slice(0, cut)}</Text>
+                    {f.path.slice(cut)}
+                  </Text>
+                  <View style={{ flex: 1 }} />
+                  <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 6, minWidth: 76 }}>
+                    {f.added ? <Text style={[mono, { color: c.statusSuccess }]}>+{f.added}</Text> : null}
+                    {f.removed ? <Text style={[mono, { color: c.statusDanger }]}>−{f.removed}</Text> : null}
+                  </View>
+                  <Diffstat added={f.added} removed={f.removed} theme={theme} />
+                </View>
+              );
+            })}
+            {failed.map((f, i) => (
+              <View key={i} style={{ flexDirection: "row", alignItems: "center", gap: 8, minHeight: 26 }}>
+                {dot}
+                <Text numberOfLines={1} style={[mono, { flexShrink: 1 }]} selectable>
+                  {f.command}
+                </Text>
+                {f.exit ? <Text style={[mono, { color: c.statusDanger }]}>exit {f.exit}</Text> : null}
+              </View>
+            ))}
+          </View>
+        </FadeIn>
+      ) : null}
     </View>
   );
 }

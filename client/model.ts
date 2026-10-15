@@ -1,5 +1,7 @@
 import type { AgentTimelineItem, ToolCallDetail } from "@getpaseo/protocol/agent-types";
 import { z } from "zod";
+import { diffLines } from "../shared/diff.ts";
+import { recapData } from "../shared/recap.ts";
 import type { Hideable } from "../shared/timeline";
 
 type Item<T extends AgentTimelineItem["type"]> = Extract<AgentTimelineItem, { type: T }>;
@@ -85,32 +87,6 @@ export function errorBody(error: unknown): string | undefined {
 export function errorText(error: unknown) {
   const line = errorBody(error)?.trim().split("\n").find((l) => l.trim())?.trim() ?? "";
   return line.length > 300 ? line.slice(0, 299) + "…" : line || undefined;
-}
-
-type DiffLine = { sign: " " | "+" | "-"; text: string; n?: number };
-
-/** Diff rows with the new-file line number (old-file number for deletions) taken from `@@` hunk headers. */
-export function diffLines(d: Extract<ToolCallDetail, { type: "edit" }>): DiffLine[] {
-  if (!d.unifiedDiff) {
-    const lines = (s: string | undefined, sign: "+" | "-") => (s ? s.split("\n").map((text) => ({ sign, text })) : []);
-    return [...lines(d.oldString, "-"), ...lines(d.newString, "+")];
-  }
-  const out: DiffLine[] = [];
-  let oldNo = 0;
-  let newNo = 0;
-  for (const l of d.unifiedDiff.split("\n")) {
-    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(l);
-    if (hunk) {
-      oldNo = Number(hunk[1]);
-      newNo = Number(hunk[2]);
-      continue;
-    }
-    if (l.startsWith("+++") || l.startsWith("---") || l.startsWith("\\")) continue;
-    const sign = l[0] === "+" || l[0] === "-" ? l[0] : " ";
-    const n = sign === "-" ? oldNo++ : sign === "+" ? newNo++ : (oldNo++, newNo++);
-    out.push({ sign, text: l.slice(1), n: n || undefined });
-  }
-  return out;
 }
 
 const tense = (running: boolean, now: string, past: string) => (running ? now : past);
@@ -299,4 +275,30 @@ export function imageData(text: string) {
   if (text.replace(IMAGE_MD, "").trim()) return undefined;
   const images = [...text.matchAll(IMAGE_MD)].map((m) => ({ alt: m[1] || "Image", url: m[2]! }));
   return images.length ? { images } : undefined;
+}
+
+/** The latest turn as Markdown for a PR or handoff: your prompt quoted, the reply, then the files changed and failed commands. */
+export function turnMarkdown(timeline: readonly AgentTimelineItem[], cwd: string): string | undefined {
+  const start = timeline.findLastIndex((item) => item.type === "user_message");
+  if (start < 0) return undefined;
+  const prompt = (timeline[start] as Item<"user_message">).text.trim();
+  const reply = timeline
+    .slice(start + 1)
+    .flatMap((item) => (item.type === "assistant_message" && item.text.trim() ? [item.text.trim()] : []))
+    .join("\n\n");
+  const parts = [prompt.split("\n").map((l) => `> ${l}`).join("\n"), reply];
+  const recap = recapData(timeline, cwd);
+  if (recap) {
+    const added = recap.files.reduce((n, f) => n + f.added, 0);
+    const removed = recap.files.reduce((n, f) => n + f.removed, 0);
+    const head = [recap.files.length && `${plural(recap.files.length, "file")} +${added} −${removed}`, recap.commands && plural(recap.commands, "command"), recap.failed.length && `${recap.failed.length} failed`];
+    parts.push(
+      [
+        `**Changes** · ${head.filter(Boolean).join(" · ")}`,
+        ...recap.files.map((f) => `- \`${f.path}\` +${f.added} −${f.removed}`),
+        ...recap.failed.map((f) => `- ✗ \`${f.command}\`${f.exit ? ` (exit ${f.exit})` : ""}`),
+      ].join("\n"),
+    );
+  }
+  return parts.filter(Boolean).join("\n\n");
 }

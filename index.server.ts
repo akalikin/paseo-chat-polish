@@ -1,6 +1,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { readImageFile } from "./server/image";
 import { readImage } from "./shared/image";
+import { recapData } from "./shared/recap";
 import { getTheme, themeSchema, themeSettings } from "./shared/theme";
 import { getPrefs, prefsSchema, prefsSettings } from "./shared/timeline";
 
@@ -15,6 +16,15 @@ export default function contribute(server: PluginServerContext) {
   server.handle(getPrefs, async () => {
     const current = await prefs.read();
     return current.status === "ready" ? current.values : prefsSchema.parse({});
+  });
+  server.on("agent.turn_ended", async (event, { paseo }) => {
+    const current = await prefs.read();
+    if (current.status === "ready" && current.values.recap === "off") return;
+    const data = recapData(event.timeline, event.agent.cwd);
+    if (!data) return;
+    // turnId can be null or repeat across turns, and a reused id replaces the older row, so the end time keeps each recap.
+    const id = `recap-${Date.now()}`;
+    await paseo.agents.ref(event.agent.id).timeline.append({ type: "plugin", id, kind: "chat-polish-recap", version: 1, data });
   });
   return () => {};
 }

@@ -29,6 +29,8 @@ export const prefsSchema = z.object({
   steps: z.enum(["faded", "full"]).catch("faded"),
   /** Paseo's own items (tool call groups, bubbles, markdown) restyled to the design on desktop, or left as Paseo draws them. */
   nativeStyle: z.enum(["design", "paseo"]).default("design"),
+  /** A recap row the daemon adds after each turn that changed files or had a failing command. */
+  recap: z.enum(["on", "off"]).default("on"),
   /** Image-only replies as thumbnails; "native" leaves them to Paseo. */
   images: z.enum(["small", "large", "native"]).default("small"),
   /** One style variant per markdown element in Paseo's own replies (desktop, with nativeStyle "design"); "a" is the base design. */

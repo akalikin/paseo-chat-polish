@@ -29,7 +29,10 @@ interface DomElement {
   innerHTML: string;
   outerHTML: string;
   scrollTop: number;
+  clientHeight: number;
+  scrollBy(options: { top: number }): void;
   appendChild(el: DomElement): void;
+  insertAdjacentElement(where: "afterend", el: DomElement): void;
   click(): void;
   getBoundingClientRect(): { top: number; left: number; right: number; bottom: number; width: number; height: number };
 }
@@ -37,12 +40,23 @@ declare const document: {
   documentElement: DomElement;
   querySelector(selector: string): DomElement | null;
   querySelectorAll(selector: string): ArrayLike<DomElement>;
-  createElement(tag: "style" | "div" | "span"): DomElement;
+  createElement(tag: "style" | "div" | "span" | "button"): DomElement;
   addEventListener(type: "click", listener: (event: { target: unknown }) => void, capture?: boolean): void;
   removeEventListener(type: "click", listener: (event: { target: unknown }) => void, capture?: boolean): void;
+  addEventListener(type: "keydown", listener: (event: KeyEvent) => void, capture?: boolean): void;
+  removeEventListener(type: "keydown", listener: (event: KeyEvent) => void, capture?: boolean): void;
   body: unknown;
   head: { appendChild(el: DomElement): void };
 };
+interface KeyEvent {
+  key: string;
+  altKey: boolean;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  preventDefault(): void;
+}
+declare function setTimeout(cb: () => void, ms: number): number;
 declare const HTMLIFrameElement: { prototype: { setAttribute(name: string, value: string): void } };
 type MessageListener = (event: { source: unknown; data: unknown }) => void;
 declare const window: { addEventListener(type: "message", listener: MessageListener): void; removeEventListener(type: "message", listener: MessageListener): void };
@@ -346,14 +360,46 @@ ${[4, 5, 3, 0, 2, 1].map((step, i) => `${DOT}:nth-child(${i + 1}) { animation-de
 @keyframes cp-dots { 0% { opacity: 1; } 70%, 90% { opacity: 0.15; } 100% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { ${DOT} { animation: none !important; } }`;
 
+const CLOCK_MASK = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16.5 12"/></svg>')}")`;
+// Paseo renders a popover once hidden (inline opacity 0, or parked at -9999px) to measure it, then places it. Animating
+// that first frame would override the hiding and flash the popover in the window corner, so motion starts once placed.
+// On close, the context card is swapped for an exit copy without its FadeIn; animating that copy made it blink, so only
+// the open card (FadeIn in its style) rises in.
+const POPOVER = `:is(:is([data-testid="combobox-desktop-container"], [data-testid="chat-outline-preview"]):not([style*="opacity: 0"]), [data-testid="context-window-details"][style*="FadeIn"]):not([style*="-9999"])`;
+
 // The chat's own chrome from the "Chat Surfaces" design: turn footer, composer, prompts, outline rail.
 const CHAT_CHROME_CSS = `
 ${FOOTER} { gap: 8px !important; min-height: 26px !important; align-items: center !important; }
 ${FOOTER} > [data-cp-part="fork"] { width: 20px !important; height: 20px !important; }
 ${FOOTER} ${FOOTER_ICON} { width: 20px !important; height: 20px !important; padding: 3px !important; margin: 0 !important; }
 ${FOOTER} > :last-child, ${FOOTER} > :last-child * { font-size: 12px !important; }
+[data-testid="user-message"] > div:first-child > div:first-child { transition: box-shadow 0.6s ease-out; }
+[data-testid="user-message"][data-cp-flash] > div:first-child > div:first-child { box-shadow: 0 0 0 1.5px var(--cp-accent); transition: none; }
 [data-testid="turn-working-indicator"] > div > div:first-child { width: 20px !important; margin-left: 0 !important; align-items: center !important; }
 ${WORKING_DOTS}
+
+/* Queued messages: a dashed "not sent yet" row with a clock and label, quiet 26px icon actions; send-now keeps the accent. */
+[data-cp-part="queued"] { min-height: 36px !important; padding: 0 6px 0 12px !important; gap: 8px !important; border: 1px dashed var(--cp-rule) !important; border-radius: 10px !important; background-color: transparent !important; }
+[data-cp-part="queued"]::before { content: ""; order: -2; flex-shrink: 0; width: 13px; height: 13px; background-color: var(--cp-muted); -webkit-mask: ${CLOCK_MASK} center / contain no-repeat; mask: ${CLOCK_MASK} center / contain no-repeat; }
+[data-cp-part="queued"]::after { content: "Queued"; order: -1; flex-shrink: 0; font-size: 11px; color: var(--cp-muted); }
+[data-cp-part="queued"] > div:first-child { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px !important; color: var(--cp-fg) !important; }
+[data-cp-part="queued"] > div:last-child { gap: 0 !important; }
+/* The actions are matched by position (edit, then send-now): Paseo builds differ in their tags and labels. */
+[data-cp-part="queued"] > div:last-child > * { width: 26px !important; height: 26px !important; min-width: 0 !important; border: 0 !important; border-radius: 7px !important; background-color: transparent !important; box-shadow: none !important; }
+[data-cp-part="queued"] > div:last-child > * * { background-color: transparent !important; }
+[data-cp-part="queued"] > div:last-child > *:hover { background-color: var(--cp-control) !important; }
+[data-cp-part="queued"] > div:last-child svg { width: 14px !important; height: 14px !important; }
+/* The icons carry their stroke as an attribute (dark, for Paseo's filled buttons); CSS stroke overrides it. */
+[data-cp-part="queued"] > div:last-child :is(svg, svg *) { stroke: var(--cp-muted) !important; }
+[data-cp-part="queued"] > div:last-child > :last-child :is(svg, svg *) { stroke: var(--cp-accent) !important; }
+[data-cp-part="queued"] > div:last-child > :last-child:is(:disabled, [aria-disabled="true"]) :is(svg, svg *) { stroke: var(--cp-muted) !important; }
+[data-cp-part="queued"] > div:last-child > :is(:disabled, [aria-disabled="true"]) { opacity: 0.45 !important; }
+[data-cp-part="queued"] > div:last-child > :is(:disabled, [aria-disabled="true"]):hover { background-color: transparent !important; }
+
+/* Popovers that open with no motion (pickers, the context card, the outline preview) rise in; Paseo's menus already animate. */
+@keyframes cp-pop { from { opacity: 0; transform: translateY(4px) scale(0.98); } to { opacity: 1; transform: none; } }
+${POPOVER} { animation: cp-pop 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both !important; }
+@media (prefers-reduced-motion: reduce) { ${POPOVER} { animation: none !important; } }
 
 [data-testid="message-input-root"] > div:first-child { border-radius: 12px !important; padding: 14px 10px 10px 16px !important; gap: 20px !important; }
 /* Paseo keeps the box two lines tall even when empty; let it size to its text instead (one line, up to 400px). */
@@ -422,6 +468,15 @@ ${LIMIT} > div:nth-child(2) > div > div:first-child > div:nth-child(2) { font-va
 ${LIMIT} > div:nth-child(2) > div > div:last-child { height: 4px !important; border-radius: 999px !important; background-color: var(--cp-control) !important; }
 ${LIMIT} > div:nth-child(2) > div > div:last-child > div { border-radius: 999px !important; }
 ${USAGE} > div:nth-child(3) { padding-top: 12px !important; border-top: 1px solid var(--cp-rule) !important; }
+[data-cp-compact] { margin: -6px -6px 0; }
+[data-cp-compact] > button { display: flex; flex: 1; align-items: center; gap: 8px; height: 30px; padding: 0 8px; border: 0; border-radius: 7px; background: transparent; color: var(--cp-fg); font: inherit; font-size: 12px; font-weight: 500; text-align: left; cursor: pointer; }
+[data-cp-compact] > button:hover { background-color: var(--cp-control); }
+[data-cp-compact] > button > span:last-child { margin-left: auto; font-size: 11px; font-weight: 400; color: var(--cp-muted); }
+[data-cp-compact][data-cp-level="high"] > button { color: var(--cp-warn); }
+[data-cp-compact] > button[disabled] { opacity: 0.6; cursor: default; }
+[data-cp-compact] svg { width: 13px; height: 13px; flex-shrink: 0; }
+/* Paseo's card sits 8px above the meter and closes 100ms after the pointer leaves both; this strip bridges the gap. */
+${CTX}::after { content: ""; position: absolute; left: 0; right: 0; top: 100%; height: 12px; }
 ${USAGE} > div:nth-child(4) { margin-top: -6px !important; }
 `;
 
@@ -654,6 +709,8 @@ const PARTS: Array<[string, (el: DomElement) => DomElement | null | undefined, s
   ['[data-testid="permission-request-question"]', (el) => (el.parentElement?.parentElement?.getAttribute("data-testid") === "permission-plan-card" ? null : el.parentElement), "permission"],
   ['[data-paseo-markdown-tag="img"]', (el) => el.parentElement, "image-text"],
   [CHIP, (el) => el, "chip"],
+  // A queued message: the card around its text and its edit / send-now buttons.
+  ['button[aria-label="Edit queued message"]', (el) => el.parentElement?.parentElement, "queued"],
   // The row holding the textarea and, while it's empty and unfocused, the "⌘L to focus" hint.
   ['[data-testid="message-input-root"] textarea', (el) => el.parentElement?.parentElement, "input-row"],
   [PRIMARY, (el) => el, "primary"],
@@ -690,7 +747,85 @@ function tagParts(roots: DomElement[]) {
     used.setAttribute("data-cp-pct", pct);
     head.style.setProperty("--cp-pct", `${pct}%`);
     head.setAttribute("data-cp-level", Number(pct) >= 80 ? "high" : "normal");
+    if (compactHandler) markCompact(card, Number(pct));
+    keepCardHeight(card);
   }
+}
+
+// Paseo loads the card's account section (usage-report-*) after it opens, so the card grows by ~170px and jumps up a
+// frame later. Remember its full height per agent and open at that height next time.
+// Kept across reloads so even the first open after a restart has its height; trimmed to the last 50 agents.
+const HEIGHTS_KEY = "chat-polish:context-card-heights";
+let cardHeights: Map<string, number> | undefined;
+function keepCardHeight(card: DomElement) {
+  // Only reached from tagParts, which runs on web; read lazily so importing this module never touches localStorage.
+  cardHeights ??= new Map(Object.entries(JSON.parse(localStorage.getItem(HEIGHTS_KEY) ?? "{}") as Record<string, number>));
+  const id = activeAgentId() ?? "";
+  if (card.querySelector('[data-testid^="usage-report-"]')) {
+    const height = Math.round(card.getBoundingClientRect().height);
+    if (height > (cardHeights.get(id) ?? 0)) {
+      cardHeights.delete(id);
+      cardHeights.set(id, height);
+      localStorage.setItem(HEIGHTS_KEY, JSON.stringify(Object.fromEntries([...cardHeights].slice(-50))));
+    }
+  }
+  const height = cardHeights.get(id);
+  if (height) card.style.setProperty("min-height", `${height}px`);
+}
+
+// ---- Compact from the context card ----
+
+let compactHandler: ((agentId: string) => Promise<void>) | undefined;
+
+/** Lets the context card's Compact button send /compact to the chat on screen. */
+export function setCompactHandler(handler: (agentId: string) => Promise<void>) {
+  compactHandler = handler;
+  return () => void (compactHandler = undefined);
+}
+
+const visible = (el: DomElement) => el.getBoundingClientRect().width > 0;
+
+/** The agent of the selected tab on screen. ponytail: with split panes this takes the first one; the meter's own pane would need Paseo to name its agent. */
+function activeAgentId() {
+  if (Platform.OS !== "web") return undefined;
+  const tab = Array.from(document.querySelectorAll('[data-testid^="workspace-tab-agent_"][aria-selected="true"]')).find(visible);
+  return tab?.getAttribute("data-testid")?.slice("workspace-tab-agent_".length);
+}
+
+const FOLD_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-6"/><path d="M12 8V2"/><path d="M4 12H2"/><path d="M10 12H8"/><path d="M16 12h-2"/><path d="M22 12h-2"/><path d="m15 19-3-3-3 3"/><path d="m15 5-3 3-3-3"/></svg>';
+
+/** A menu-style "Compact conversation" row under the percent bar; hidden while the agent is working, since /compact would wait behind the turn. */
+function markCompact(card: DomElement, pct: number) {
+  let row = card.querySelector("[data-cp-compact]");
+  if (!row) {
+    row = document.createElement("div");
+    row.setAttribute("data-cp-compact", "");
+    row.innerHTML = `<button type="button">${FOLD_ICON}<span>Compact conversation</span><span></span></button>`;
+    const button = row.firstElementChild!;
+    const label = button.children[1]!;
+    button.addEventListener("click", () => {
+      const id = activeAgentId();
+      if (!id || !compactHandler || button.hasAttribute("disabled")) return;
+      button.setAttribute("disabled", "");
+      label.textContent = "Compacting…";
+      compactHandler(id).catch((error: unknown) => {
+        console.warn("[chat-polish] /compact failed", error);
+        button.removeAttribute("disabled");
+        label.textContent = "Try again";
+      });
+    });
+    // Right under the usage figures and above Paseo's divider; the account section loads later and goes below.
+    card.firstElementChild?.insertAdjacentElement("afterend", row);
+  }
+  const low = pct >= 60;
+  row.setAttribute("data-cp-level", low ? "high" : "normal");
+  // Only write text that changed: every write is a DOM mutation that runs this pass again.
+  const hint = row.firstElementChild!.lastElementChild!;
+  const text = low ? "running low" : "summarize so far";
+  if (hint.textContent !== text) hint.textContent = text;
+  const working = Array.from(document.querySelectorAll('button[aria-label="Stop agent"]')).some(visible);
+  row.style.setProperty("display", working ? "none" : "flex");
 }
 
 // ---- Rich text variants ----
@@ -1120,4 +1255,51 @@ function noteThinkingFallback() {
     composer.appendChild(hint);
     setTimeout(() => hint.remove(), 6000);
   }
+}
+
+// ---- Jump between prompts ----
+
+/** The chat on screen: other tabs keep their scrollers mounted but hidden (zero size). */
+function visibleChat() {
+  return Array.from(document.querySelectorAll('[data-testid="agent-chat-scroll"]')).find((el) => el.getBoundingClientRect().height > 0);
+}
+
+/**
+ * Scrolls the visible chat to your previous (-1) or next (1) message and outlines it briefly. Paseo's list only mounts
+ * the messages near the viewport, so when none is mounted in that direction it scrolls a screen at a time until one is.
+ */
+export function jumpToPrompt(direction: -1 | 1) {
+  if (Platform.OS !== "web") return;
+  const chat = visibleChat();
+  if (!chat) return;
+  let tries = 0;
+  const step = () => {
+    const top = chat.getBoundingClientRect().top;
+    const offsets = Array.from(chat.querySelectorAll('[data-testid="user-message"]')).map((el) => ({ el, y: el.getBoundingClientRect().top - top }));
+    // A message we landed on sits about 16px down (more at the very top of a chat), so "next" starts below that band.
+    const target = direction < 0 ? offsets.filter((m) => m.y < -4).pop() : offsets.find((m) => m.y > 64);
+    if (target) {
+      chat.scrollBy({ top: target.y - 16 });
+      target.el.setAttribute("data-cp-flash", "");
+      setTimeout(() => target.el.removeAttribute("data-cp-flash"), 900);
+      return;
+    }
+    const before = chat.scrollTop;
+    chat.scrollBy({ top: direction * chat.clientHeight * 0.9 });
+    // ponytail: gives up after 40 screens; a jump through a longer gap needs Paseo to expose its message index.
+    if (chat.scrollTop !== before && ++tries < 40) requestAnimationFrame(() => requestAnimationFrame(step));
+  };
+  step();
+}
+
+/** ⌥⌘↑ / ⌥⌘↓ jump between your messages in the visible chat. */
+export function bindPromptKeys() {
+  if (Platform.OS !== "web") return () => {};
+  const onKey = (e: KeyEvent) => {
+    if (!e.altKey || !e.metaKey || e.ctrlKey || e.shiftKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+    e.preventDefault();
+    jumpToPrompt(e.key === "ArrowUp" ? -1 : 1);
+  };
+  document.addEventListener("keydown", onKey, true);
+  return () => document.removeEventListener("keydown", onKey, true);
 }

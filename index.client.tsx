@@ -1,21 +1,32 @@
 import type { PluginTimelineData } from "@getpaseo/plugin";
 import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
+import { copyText, useToast, type ToastApi } from "@getpaseo/plugin/client/react-native";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { useEffect } from "react";
 import { Dashboard } from "./client/dashboard";
-import { hideableKind, imageData, imagesSchema, noticeData, noticeSchema, planSchema, thoughtSchema, todoData, todoSchema, toolData, toolSchema } from "./client/model";
-import { currentPrefs, setPrefs, subscribePrefs } from "./client/prefs";
+import { hideableKind, imageData, turnMarkdown, imagesSchema, noticeData, noticeSchema, planSchema, thoughtSchema, todoData, todoSchema, toolData, toolSchema } from "./client/model";
+import { currentPrefs, savePrefs, setPrefs, subscribePrefs, usePrefsSaver } from "./client/prefs";
 import { bindThemeRegistry, currentTheme, registerTheme } from "./client/theme-registry";
-import { clampUserMessages, paintSidebar, readHostAppearance, restyleNative, setNativeColors, setRailProviders, setRichText, watchDom } from "./client/web";
+import { bindPromptKeys, clampUserMessages, jumpToPrompt, paintSidebar, setCompactHandler, readHostAppearance, restyleNative, setNativeColors, setRailProviders, setRichText, watchDom } from "./client/web";
 import { getTheme, THEME_CATALOG_ID, themeSchema } from "./shared/theme";
-import { getPrefs } from "./shared/timeline";
-import { ImagesItem, NoticeItem, PlanItem, ThoughtItem, TodoItem, ToolItem } from "./client/views";
+import { getPrefs, type Prefs } from "./shared/timeline";
+import { ImagesItem, NoticeItem, PlanItem, RecapItem, ThoughtItem, TodoItem, ToolItem } from "./client/views";
+import { recapSchema } from "./shared/recap";
 
 const KIND = "chat-polish";
+
+// Toasts come from a hook; the sidebar item, always mounted on desktop, lends its toast to Command Center callbacks.
+let toast: ToastApi | undefined;
 
 function DashboardItem({ currentScreen, openScreen, theme }: PluginSidebarItemProps) {
   // Always mounted on desktop, so it is where the restyle learns the app theme's colors.
   useEffect(() => setNativeColors(theme.colors), [theme]);
+  // Also always mounted, so it saves the prefs Command Center toggles change.
+  usePrefsSaver();
+  const hostToast = useToast();
+  useEffect(() => {
+    toast = hostToast;
+  }, [hostToast]);
   return <SidebarRow icon="Sparkles" active={currentScreen?.screenId === "dashboard"} onPress={() => openScreen({ screenId: "dashboard" })} />;
 }
 
@@ -125,10 +136,60 @@ export default function contribute(client: PluginClientContext) {
   client.addTimelineRenderer({ kind: `${KIND}-todo`, version: 1, schema: todoSchema, Component: TodoItem });
   client.addTimelineRenderer({ kind: `${KIND}-notice`, version: 1, schema: noticeSchema, Component: NoticeItem });
   client.addTimelineRenderer({ kind: `${KIND}-images`, version: 1, schema: imagesSchema, Component: ImagesItem });
+  client.addTimelineRenderer({ kind: `${KIND}-recap`, version: 1, schema: recapSchema, Component: RecapItem });
+
+  const unbindPromptKeys = bindPromptKeys();
+  for (const [id, title, direction] of [["previous-prompt", "Previous prompt", -1], ["next-prompt", "Next prompt", 1]] as const) {
+    client.addCommandCenterItem({ id, title, icon: direction < 0 ? "ArrowUpToLine" : "ArrowDownToLine", keywords: ["jump", "message", "chat polish"], context: "agent", onSelect: () => jumpToPrompt(direction) });
+  }
+  client.addCommandCenterItem({
+    id: "copy-turn",
+    title: "Copy last turn as Markdown",
+    icon: "ClipboardCopy",
+    keywords: ["markdown", "handoff", "pr", "chat polish"],
+    context: "agent",
+    async onSelect({ paseo, agent }) {
+      try {
+        const page = await paseo.agents.ref(agent.id).timeline.refetch({ direction: "tail", limit: 500, projection: "projected" });
+        const markdown = turnMarkdown(page.entries.map((e) => e.item), agent.cwd);
+        if (!markdown) return void toast?.show("There's no turn to copy yet.");
+        await copyText(markdown);
+        toast?.show("Copied the last turn as Markdown", { variant: "success" });
+      } catch (error) {
+        console.warn("[chat-polish] Copy last turn failed", error);
+        toast?.error("Couldn't copy the last turn.");
+      }
+    },
+  });
+  const unsetCompact = setCompactHandler((agentId) => client.paseo.agents.ref(agentId).send("/compact"));
+  client.addCommandCenterItem({ id: "open", title: "Open Chat Polish", icon: "Sparkles", context: "global", onSelect: ({ openScreen }) => openScreen({ screenId: "dashboard" }) });
+  // Toggle titles name what selecting them does, so they are re-added whenever prefs change.
+  const toggles = (p: Prefs): Array<[string, string, string, Partial<Prefs>]> => {
+    const hidesReads = p.hidden.includes("read") && p.hidden.includes("search");
+    return [
+      ["steps", p.steps === "faded" ? "Show thought and tool rows at full strength" : "Fade thought and tool rows", "Blend", { steps: p.steps === "faded" ? "full" : "faded" }],
+      ["reads", hidesReads ? "Show finished reads and searches" : "Hide finished reads and searches", "EyeOff", { hidden: hidesReads ? p.hidden.filter((h) => h !== "read" && h !== "search") : [...new Set([...p.hidden, "read", "search"] as const)] }],
+      ["recap", p.recap === "on" ? "Turn off turn recaps" : "Turn on turn recaps", "FileDiff", { recap: p.recap === "on" ? "off" : "on" }],
+      ["native", p.nativeStyle === "design" ? "Leave Paseo's own items as Paseo draws them" : "Restyle Paseo's own items", "Paintbrush", { nativeStyle: p.nativeStyle === "design" ? "paseo" : "design" }],
+    ];
+  };
+  let removeToggles: Array<() => void> = [];
+  const addToggles = () => {
+    removeToggles.forEach((r) => void r());
+    removeToggles = toggles(currentPrefs()).map(([id, title, icon, change]) =>
+      client.addCommandCenterItem({ id: `toggle-${id}`, title: `Chat Polish: ${title}`, icon, keywords: ["chat polish", "toggle"], context: "global", onSelect: () => savePrefs({ ...currentPrefs(), ...change }) }),
+    );
+  };
+  addToggles();
+  const unsubscribeToggles = subscribePrefs(addToggles);
 
   client.addScreen({ id: "dashboard", title: "Chat Polish", Component: Dashboard });
   client.addSidebarHeaderItem({ id: "dashboard", title: "Chat Polish", Component: DashboardItem });
   return () => {
+    unsetCompact();
+    unsubscribeToggles();
+    removeToggles.forEach((r) => void r());
+    unbindPromptKeys();
     unsubscribePrefs();
     unwatchHost();
     removeTransformers();

@@ -152,7 +152,7 @@ test("hideable kinds: only completed reads, searches, fetches and background tas
   assert.equal(hideableKind(tool({ type: "read", filePath: "a.ts" }, { status: "failed" })), undefined);
   assert.equal(hideableKind(tool({ type: "read", filePath: "a.ts" }, { status: "running" })), undefined);
   assert.equal(hideableKind(tool({ type: "shell", command: "ls" })), undefined);
-  assert.deepEqual(prefsSchema.parse({}), { reasoning: "paseo", toolDetails: "collapsed", commandColors: "expanded", hidden: [], userMessages: "clamp", steps: "faded", nativeStyle: "design", images: "small", richText: { quote: "a", table: "a", code: "a", inline: "a", heading: "a", list: "a", callout: "a", rule: "a" } });
+  assert.deepEqual(prefsSchema.parse({}), { reasoning: "paseo", toolDetails: "collapsed", commandColors: "expanded", hidden: [], userMessages: "clamp", steps: "faded", nativeStyle: "design", recap: "on", images: "small", richText: { quote: "a", table: "a", code: "a", inline: "a", heading: "a", list: "a", callout: "a", rule: "a" } });
   // Saved prefs from before rich text variants still load, with each element on its base style.
   assert.equal(prefsSchema.parse({ images: "large" }).richText.callout, "a");
   assert.equal(prefsSchema.parse({ richText: { table: "c" } }).richText.table, "c");
@@ -160,4 +160,44 @@ test("hideable kinds: only completed reads, searches, fetches and background tas
   assert.equal(prefsSchema.parse({ richText: { table: "d" } }).richText.table, "d");
   assert.equal(prefsSchema.parse({ steps: "merged" }).steps, "faded");
   assert.equal(prefsSchema.safeParse({ richText: { quote: "d" } }).success, false);
+});
+
+test("turn recap: files with +/− relative to cwd, failed commands with exit codes, nothing for read-only turns", async () => {
+  const { recapData } = await import("../shared/recap.ts");
+  const timeline = [
+    { type: "user_message", text: "earlier turn" },
+    tool({ type: "shell", command: "make" }, { status: "failed", error: { message: "x" } }),
+    { type: "user_message", text: "this turn" },
+    tool({ type: "edit", filePath: "/w/src/a.ts", unifiedDiff: "@@ -1,2 +1,2 @@\n-old\n+new\n same" }),
+    tool({ type: "edit", filePath: "/w/src/a.ts", oldString: "x", newString: "y\nz" }),
+    tool({ type: "write", filePath: "/w/new.md", content: "a\nb\nc" }),
+    tool({ type: "edit", filePath: "/w/skip.ts", oldString: "x", newString: "y" }, { status: "failed", error: { message: "no match" } }),
+    tool({ type: "shell", command: "npm test\n--watch", exitCode: 1 }),
+    tool({ type: "shell", command: "rg x" }, { status: "failed", error: { type: "tool_result", content: "Exit code 2\nboom" } }),
+    tool({ type: "shell", command: "ls" }),
+    tool({ type: "write", filePath: "/Users/kvy/notes/todo.md", content: "x" }),
+  ];
+  assert.deepEqual(recapData(timeline, "/w"), {
+    files: [{ path: "src/a.ts", added: 3, removed: 2 }, { path: "new.md", added: 3, removed: 0 }, { path: "~/notes/todo.md", added: 1, removed: 0 }],
+    commands: 3,
+    failed: [{ command: "npm test", exit: 1 }, { command: "rg x", exit: 2 }],
+  });
+  assert.equal(recapData([tool({ type: "read", filePath: "/w/a.ts" }), tool({ type: "shell", command: "ls" })], "/w"), undefined);
+});
+
+test("turn as Markdown: quoted prompt, reply, then changes from the recap", async () => {
+  const { turnMarkdown } = await import("../client/model.ts");
+  const md = turnMarkdown(
+    [
+      { type: "user_message", text: "old" },
+      { type: "user_message", text: "fix it\nplease" },
+      { type: "assistant_message", text: "Fixed." },
+      tool({ type: "edit", filePath: "/w/a.ts", oldString: "x", newString: "y" }),
+      tool({ type: "shell", command: "npm test" }, { status: "failed", error: { message: "x" } }),
+      { type: "assistant_message", text: "Done." },
+    ],
+    "/w",
+  );
+  assert.equal(md, "> fix it\n> please\n\nFixed.\n\nDone.\n\n**Changes** · 1 file +1 −1 · 1 command · 1 failed\n- `a.ts` +1 −1\n- ✗ `npm test`");
+  assert.equal(turnMarkdown([{ type: "assistant_message", text: "hi" }], "/w"), undefined);
 });

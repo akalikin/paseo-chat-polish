@@ -443,7 +443,7 @@ ${LOADERS}
 
 /* Popovers that open with no motion (pickers, the context card, the outline preview) rise in; Paseo's menus already animate. */
 @keyframes cp-pop { from { opacity: 0; transform: translateY(4px) scale(0.98); } to { opacity: 1; transform: none; } }
-${POPOVER} { animation: cp-pop 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both !important; }
+${POPOVER} { animation: cp-pop 160ms cubic-bezier(0.23, 1, 0.32, 1) both !important; }
 @media (prefers-reduced-motion: reduce) { ${POPOVER} { animation: none !important; } }
 
 [data-testid="message-input-root"] > div:first-child { border-radius: 12px !important; padding: 14px 10px 10px 16px !important; gap: 20px !important; }
@@ -1118,6 +1118,7 @@ ${MODEL_POP} ${MODEL_ROW} svg { stroke: var(--cp-accent) !important; }
 [data-cp-rail] svg { width: 14px; height: 14px; }
 [data-cp-rail] [data-cp-label] { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 [data-cp-rail] [data-cp-status="loading"] svg { color: var(--cp-muted); animation: cp-spin 1s linear infinite; }
+@media (prefers-reduced-motion: reduce) { [data-cp-rail] [data-cp-status="loading"] svg { animation: none !important; } }
 [data-cp-rail] [data-cp-status="error"] svg { color: #e06c75; }
 @keyframes cp-spin { to { transform: rotate(360deg); } }
 [data-cp-tip] { position: absolute; z-index: 1; display: none; max-width: 220px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--cp-rule); background: var(--cp-sunken); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); font-size: 12px; line-height: 1.45; color: var(--cp-muted); pointer-events: none; }

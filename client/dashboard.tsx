@@ -10,7 +10,7 @@ import { hideableKind, toolData } from "./model";
 import { PrefsOverride, setPrefs, usePrefs } from "./prefs";
 import { registerTheme, useCurrentTheme } from "./theme-registry";
 import { PLAIN_SYNTAX, SYNTAX_THEMES } from "./highlight";
-import { alpha, AppearanceOverride, CodeLine, ImagesItem, MergedSteps, PMONO, sunken, SyntaxOverride, ThoughtItem, ToolItem, useStyles } from "./views";
+import { alpha, AppearanceOverride, CodeLine, ImagesItem, MergedSteps, PMONO, sunken, SyntaxOverride, ThoughtItem, ToolItem, useReducedMotion, useStyles } from "./views";
 import { canSetAppTheme, DEFAULTS, PASEO_FONT_STACKS, readHostAppearance, readSyntaxTheme, setAppTheme, updateAppSettings } from "./web";
 
 type ToolCall = Extract<AgentTimelineItem, { type: "tool_call" }>;
@@ -122,6 +122,7 @@ function previewTheme(d: ThemeDraft, host: PluginTheme): PluginTheme {
 
 function Button({ theme, label, icon, primary, disabled, onPress }: { theme: PluginTheme; label: string; icon: string; primary?: boolean; disabled?: boolean; onPress(): void }) {
   const s = useStyles(theme);
+  const reducedMotion = useReducedMotion();
   const c = theme.colors;
   const fg = primary ? c.accentForeground : c.foreground;
   return (
@@ -129,16 +130,17 @@ function Button({ theme, label, icon, primary, disabled, onPress }: { theme: Plu
       accessibilityRole="button"
       disabled={disabled}
       onPress={onPress}
-      style={{
+      style={({ pressed }) => ({
         flexDirection: "row",
         alignItems: "center",
         gap: 6,
         paddingHorizontal: 12,
         paddingVertical: 7,
         borderRadius: 8,
-        opacity: disabled ? 0.45 : 1,
+        opacity: disabled ? 0.45 : reducedMotion && pressed ? 0.8 : 1,
+        transform: pressed && !reducedMotion ? [{ scale: 0.97 }] : undefined,
         ...(primary ? { backgroundColor: c.accent } : { borderWidth: StyleSheet.hairlineWidth, borderColor: c.border }),
-      }}
+      })}
     >
       <Icon name={icon} size={14} color={primary ? fg : c.foregroundMuted} />
       <Text style={[s.verb, { color: fg, fontWeight: primary ? "600" : "400" }]}>{label}</Text>
@@ -786,6 +788,7 @@ const LOADER_LABELS: Record<Loader, string> = { dots: "Dots", sparkle: "Sparkle"
 /** One loader running for real: the timeline's overlay (css in web.ts) scoped to this tile instead of the whole page. */
 function LoaderTile({ theme, id, on, onPress }: { theme: PluginTheme; id: Loader; on: boolean; onPress(): void }) {
   const s = useStyles(theme);
+  const reducedMotion = useReducedMotion();
   const c = theme.colors;
   const vars = { "--cp-fg": c.foreground, "--cp-accent": c.accent, "--cp-mono": "ui-monospace, Menlo, monospace" } as CSSProperties;
   const dot = 10 / 3;
@@ -796,7 +799,7 @@ function LoaderTile({ theme, id, on, onPress }: { theme: PluginTheme; id: Loader
       accessibilityLabel={LOADER_LABELS[id]}
       accessibilityState={{ checked: on }}
       onPress={onPress}
-      style={{ flex: 1, alignItems: "center", gap: 10, paddingTop: 16, paddingBottom: 9, borderRadius: 8, backgroundColor: c.surface0, borderWidth: on ? 1.5 : StyleSheet.hairlineWidth, borderColor: on ? c.accent : c.border }}
+      style={({ pressed }) => ({ flex: 1, alignItems: "center", gap: 10, paddingTop: 16, paddingBottom: 9, borderRadius: 8, backgroundColor: c.surface0, borderWidth: on ? 1.5 : StyleSheet.hairlineWidth, borderColor: on ? c.accent : c.border, opacity: reducedMotion && pressed ? 0.8 : 1, transform: pressed && !reducedMotion ? [{ scale: 0.97 }] : undefined })}
     >
       {id === "dots" ? (
         <div data-cp-dots="" style={{ ...box, display: "flex", alignItems: "center", justifyContent: "center" }}>

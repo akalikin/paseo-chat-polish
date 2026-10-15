@@ -123,7 +123,7 @@ function subscribeReducedMotion(listener: () => void) {
     }
   };
 }
-function useReducedMotion() {
+export function useReducedMotion() {
   return useSyncExternalStore(subscribeReducedMotion, () => reducedMotion);
 }
 
@@ -133,7 +133,7 @@ function useTween(to: number, duration: number, from = to, native = NATIVE_DRIVE
   const value = useRef(new Animated.Value(from)).current;
   useEffect(() => {
     if (reduced) return void value.setValue(to);
-    const anim = Animated.timing(value, { toValue: to, duration, easing: Easing.out(Easing.cubic), useNativeDriver: native });
+    const anim = Animated.timing(value, { toValue: to, duration, easing: Easing.bezier(0.23, 1, 0.32, 1), useNativeDriver: native });
     anim.start();
     return () => anim.stop();
   }, [to, reduced, duration, native, value]);
@@ -148,11 +148,12 @@ function usePulse(active: boolean) {
     value.setValue(1);
     if (!active || reduced) return;
     const step = (toValue: number) =>
-      Animated.timing(value, { toValue, duration: 1100, easing: Easing.inOut(Easing.ease), useNativeDriver: NATIVE_DRIVER });
+      Animated.timing(value, { toValue, duration: 1100, easing: Easing.inOut(Easing.ease), isInteraction: false, useNativeDriver: NATIVE_DRIVER });
     const loop = Animated.loop(Animated.sequence([step(0.45), step(1)]));
     loop.start();
     return () => {
       loop.stop();
+      value.stopAnimation();
       value.setValue(1);
     };
   }, [active, reduced, value]);
@@ -163,13 +164,21 @@ function usePulse(active: boolean) {
 function useSwap(key: string, active: boolean) {
   const reduced = useReducedMotion();
   const value = useRef(new Animated.Value(1)).current;
-  const first = useRef(true);
+  const previousKey = useRef(key);
   useEffect(() => {
-    if (first.current) return void (first.current = false);
-    if (!active || reduced) return;
+    const changed = previousKey.current !== key;
+    previousKey.current = key;
+    if (!active || reduced) {
+      value.stopAnimation();
+      value.setValue(1);
+      return;
+    }
+    if (!changed) return;
     value.setValue(0.25);
-    const anim = Animated.timing(value, { toValue: 1, duration: 240, easing: Easing.out(Easing.cubic), useNativeDriver: NATIVE_DRIVER });
-    anim.start();
+    const anim = Animated.timing(value, { toValue: 1, duration: 240, easing: Easing.bezier(0.23, 1, 0.32, 1), useNativeDriver: NATIVE_DRIVER });
+    anim.start(({ finished }) => {
+      if (finished) value.setValue(1);
+    });
     return () => anim.stop();
   }, [key, active, reduced, value]);
   return active ? { opacity: value, transform: [{ translateY: value.interpolate({ inputRange: [0, 1], outputRange: [4, 0] }) }] } : null;
@@ -227,20 +236,25 @@ function useIndent(kind: IconKind) {
 
 /** Shows `value` until its key changes, then keeps each new one up at least `hold` ms; changes inside the hold collapse into the latest,
  * so a run that steps quickly reads as a few calm label changes instead of a flicker. */
-function useSteady<T>(value: T, key: string, hold: number): T {
+function useSteady<T>(value: T, key: string, hold: number, active = true): T {
   const [shown, setShown] = useState({ key, value });
   const since = useRef(0);
   const latest = useRef(value);
   latest.current = value;
   useEffect(() => {
+    if (!active) {
+      since.current = 0;
+      if (key !== shown.key) setShown({ key, value: latest.current });
+      return;
+    }
     if (key === shown.key) return;
     const timer = setTimeout(() => {
       since.current = Date.now();
       setShown({ key, value: latest.current });
     }, Math.max(0, since.current + hold - Date.now()));
     return () => clearTimeout(timer);
-  }, [key, shown.key, hold]);
-  return key === shown.key ? value : shown.value;
+  }, [key, shown.key, hold, active]);
+  return active && key !== shown.key ? shown.value : value;
 }
 
 function Row(p: RowProps) {
@@ -509,7 +523,8 @@ export function MergedSteps(
   const fresh = live
     ? { verb: now?.verb ?? (live.phase === "streaming" ? "Thinking" : "Thought"), target: now?.target, mono: now?.mono, shell: now?.shell }
     : { verb: stepSummary(steps.map((s) => s.item)) };
-  const label = useSteady(fresh, `${fresh.verb}\n${fresh.target ?? ""}`, 700);
+  const holdLabel = !!live && !(live.item.type === "tool_call" && (live.item.status === "failed" || live.item.status === "canceled"));
+  const label = useSteady(fresh, `${fresh.verb}\n${fresh.target ?? ""}`, 700, holdLabel);
   if (steps.length < 2) return steps[0] ? step(steps[0]) : null;
   const c = theme.colors;
   const failed = steps.filter((s) => s.item.type === "tool_call" && s.item.status === "failed").length;
@@ -633,7 +648,7 @@ export function TodoItem({ item, theme }: PluginTimelineItemProps<z.output<typeo
   const c = theme.colors;
   const items = item.data.items;
   const done = items.filter((t) => t.status === "completed").length;
-  const width = useTween(items.length ? (120 * done) / items.length : 0, 300, undefined, false);
+  const progress = useTween(items.length ? done / items.length : 0, 300);
   return (
     <View style={{ gap: 8 }}>
       <View style={[s.row, { gap: 10, paddingVertical: 0, minHeight: 20 }]}>
@@ -644,8 +659,8 @@ export function TodoItem({ item, theme }: PluginTimelineItemProps<z.output<typeo
         <Text {...PMONO} style={[s.code, { color: c.foregroundMuted }]}>
           {done} / {items.length}
         </Text>
-        <View style={{ width: 120, height: 3, borderRadius: 2, backgroundColor: c.surface2 }}>
-          <Animated.View style={{ width, height: 3, borderRadius: 2, backgroundColor: c.accent }} />
+        <View style={{ width: 120, height: 3, borderRadius: 2, overflow: "hidden", backgroundColor: c.surface2 }}>
+          <Animated.View style={{ width: 120, height: 3, borderRadius: 2, backgroundColor: c.accent, transformOrigin: "left center", transform: [{ scaleX: progress }] }} />
         </View>
       </View>
       <View style={{ paddingLeft: INDENT, gap: 6 }}>

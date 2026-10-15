@@ -47,4 +47,4 @@ paseo plugin install .              # once, from this directory
 paseo plugin reload paseo-chat-polish
 ```
 
-Designs live in `design/dashboard.pen` (open it with [pen.dev](https://pen.dev)). `OVERVIEW.md` lists every feature in detail.
+Designs live in `design/dashboard.pen` (open it with [pen.dev](https://pen.dev)).

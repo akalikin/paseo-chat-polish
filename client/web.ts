@@ -32,7 +32,7 @@ interface DomElement {
   clientHeight: number;
   scrollBy(options: { top: number }): void;
   appendChild(el: DomElement): void;
-  insertAdjacentElement(where: "afterend", el: DomElement): void;
+  insertAdjacentElement(where: "afterend" | "beforeend", el: DomElement): void;
   click(): void;
   getBoundingClientRect(): { top: number; left: number; right: number; bottom: number; width: number; height: number };
 }
@@ -354,11 +354,41 @@ const SECONDARY = ':is([data-testid="permission-request-deny"], [data-testid="qu
 
 // Paseo steps the working dots' opacity from JS every ~160ms, which reads as slow and choppy. The same
 // clockwise chase (dots 4, 6, 5, 3, 1, 2) as a CSS animation runs smoothly on the compositor.
-const DOT = '[data-testid="turn-working-indicator"] > div > div:first-child > div > div > div > div';
+// WORKING_BOX is the indicator's 14px box (tagged by tagParts; the dashboard preview draws one too), its first child Paseo's 2 × 3 grid.
+const WORKING_BOX = '[data-cp-part="loader"]';
+const DOT = `${WORKING_BOX} > div:first-child > div`;
 const WORKING_DOTS = `${DOT} { animation: cp-dots 0.8s linear infinite !important; }
 ${[4, 5, 3, 0, 2, 1].map((step, i) => `${DOT}:nth-child(${i + 1}) { animation-delay: ${((step - 6) * 0.8) / 6}s !important; }`).join("\n")}
 @keyframes cp-dots { 0% { opacity: 1; } 70%, 90% { opacity: 0.15; } 100% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { ${DOT} { animation: none !important; } }`;
+
+// Other loaders (Dashboard → Messages → Working indicator): tagParts puts nine <i> over the box, Paseo's grid hides,
+// and each loader draws with the dots it needs (or the overlay's ::before). Sizes scale the whole box.
+const L = (name: string) => `:root[data-cp-rt-loader="${name}"] [data-cp-loader]`;
+const RING = [0, 1, 2, 3, 4, 5, 6, 7];
+const LOADERS = `
+${WORKING_BOX} { position: relative; }
+:root[data-cp-rt-loader-size="m"] ${WORKING_BOX} { transform: scale(1.15); }
+:root[data-cp-rt-loader-size="l"] ${WORKING_BOX} { transform: scale(1.3); }
+[data-cp-loader] { display: none; position: absolute; inset: 0; pointer-events: none; color: var(--cp-fg); }
+:root[data-cp-rt-loader] ${WORKING_BOX} > div:first-child { visibility: hidden; }
+:root[data-cp-rt-loader] [data-cp-loader] { display: block; }
+[data-cp-loader] > i { position: absolute; display: none; border-radius: 50%; background: currentColor; }
+${[...Array(9)].map((_, i) => `[data-cp-loader] > i:nth-child(${i + 1}) { --i: ${i}; --c: ${i % 3}; --r: ${Math.floor(i / 3)}; --m: ${Math.max(Math.abs((i % 3) - 1), Math.abs(Math.floor(i / 3) - 1))}; --s: ${[0, 1, 2, 5, 4, 3, 6, 7, 8].indexOf(i)}; }`).join("\n")}
+@keyframes cp-tail { 0% { opacity: 1; } 100% { opacity: 0.15; } }
+@keyframes cp-spin { to { transform: rotate(360deg); } }
+${L("sparkle")}::before { content: "·"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font: 13px/1 var(--cp-mono); color: var(--cp-accent); animation: cp-sparkle 1.2s steps(1) infinite; }
+@keyframes cp-sparkle { 0% { content: "·"; } 10% { content: "✢"; } 20% { content: "✳"; } 30% { content: "✶"; } 40% { content: "✻"; } 50% { content: "✽"; } 60% { content: "✻"; } 70% { content: "✶"; } 80% { content: "✳"; } 90% { content: "✢"; } }
+${L("spokes")} > i:nth-child(-n+8) { display: block; left: 50%; top: 50%; width: 1.4px; height: 3.6px; margin: -1.8px 0 0 -0.7px; border-radius: 1px; transform: rotate(calc(var(--i) * 45deg)) translateY(-4.4px); animation: cp-tail 0.9s linear infinite; animation-delay: calc((var(--i) - 8) * 0.9s / 8); }
+${L("dotring")} > i:nth-child(-n+8) { display: block; left: 50%; top: 50%; width: 2.4px; height: 2.4px; margin: -1.2px 0 0 -1.2px; transform: rotate(calc(var(--i) * 45deg)) translateY(-5px); animation: cp-tail 1s linear infinite; animation-delay: calc((var(--i) - 8) * 1s / 8); }
+${L("orb")}::before { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #fff 0, var(--cp-accent) 45%, color-mix(in srgb, var(--cp-accent), #000 40%) 100%); animation: cp-orb 2s ease-in-out infinite; }
+@keyframes cp-orb { 0%, 100% { transform: scale(0.78); box-shadow: 0 0 0 0 transparent; opacity: 0.75; } 50% { transform: scale(1); box-shadow: 0 0 5px 1.5px color-mix(in srgb, var(--cp-accent) 45%, transparent); opacity: 1; } }
+:is(${L("matrix")}, ${L("snake")}) > i { display: block; width: 2.6px; height: 2.6px; left: calc(1.5px + var(--c) * 4.2px); top: calc(1.5px + var(--r) * 4.2px); }
+${L("matrix")} > i { animation: cp-matrix 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite; animation-delay: calc(var(--m) * 0.14s); }
+@keyframes cp-matrix { 0%, 100% { opacity: 0.2; transform: scale(0.7); } 30% { opacity: 1; transform: scale(1.1); } 60% { opacity: 0.3; transform: scale(0.8); } }
+${L("snake")} > i { animation: cp-snake 1.35s linear infinite; animation-delay: calc((var(--s) - 9) * 1.35s / 9); }
+@keyframes cp-snake { 0% { opacity: 1; } 33% { opacity: 0.35; } 55%, 100% { opacity: 0.12; } }
+@media (prefers-reduced-motion: reduce) { [data-cp-loader] > i, [data-cp-loader]::before { animation: none !important; } }`;
 
 const CLOCK_MASK = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16.5 12"/></svg>')}")`;
 // Paseo renders a popover once hidden (inline opacity 0, or parked at -9999px) to measure it, then places it. Animating
@@ -377,6 +407,7 @@ ${FOOTER} > :last-child, ${FOOTER} > :last-child * { font-size: 12px !important;
 [data-testid="user-message"][data-cp-flash] > div:first-child > div:first-child { box-shadow: 0 0 0 1.5px var(--cp-accent); transition: none; }
 [data-testid="turn-working-indicator"] > div > div:first-child { width: 20px !important; margin-left: 0 !important; align-items: center !important; }
 ${WORKING_DOTS}
+${LOADERS}
 
 /* Queued messages: a dashed "not sent yet" row with a clock and label, quiet 26px icon actions; send-now keeps the accent. */
 [data-cp-part="queued"] { min-height: 36px !important; padding: 0 6px 0 12px !important; gap: 8px !important; border: 1px dashed var(--cp-rule) !important; border-radius: 10px !important; background-color: transparent !important; }
@@ -492,17 +523,25 @@ ${ROW_ICON}[data-cp-chev] > div { position: absolute !important; right: 4px; top
 ${ROW_ICON}[data-cp-chev] svg { width: 9px !important; height: 9px !important; }
 ${ROW_ICON}[data-cp-chev] + div { padding-right: 18px !important; }
 ${ROW} > button > div > div:nth-child(2) > [dir]:first-child { color: var(--cp-fg) !important; }
+/* Row icons hidden per kind (Paseo's groups count as merged rows, its single calls as tool calls): the slot collapses; an open or hovered row keeps its chevron at the row's end. */
+${([["tool-call-group", "steps"], ["tool-call-badge", "tool"]] as const)
+  .map(([testid, kind]) => {
+    const slot = `:root[data-cp-rt-icon-${kind}="hide"] [data-testid="${testid}"] > button > div > div:first-child`;
+    return `${slot} { width: 0 !important; margin-right: 0 !important; }\n${slot}:not([data-cp-chev]) > svg, ${slot}[data-cp-chev]::before { display: none !important; }`;
+  })
+  .join("\n")}
 /* Running rows draw a shimmer from a transparent copy of the labels laid over them: type changes go to both so they stay aligned. */
 ${ROW} > button > div > div:nth-child(2) [dir]:first-child { font-weight: 500 !important; }
 [data-testid="tool-call-badge"] > button > div > div:nth-child(2) [dir]:nth-child(2) { font-family: var(--cp-mono) !important; font-size: calc(var(--cp-code) + 1px) !important; }
-[data-testid="tool-call-group"] { margin-top: -3px !important; margin-bottom: -3px !important; }
+/* Same pitch as the plugin's rows, taken off the top so a row sits midway between the reply blocks around it. */
+[data-testid="tool-call-group"] { margin-top: -9px !important; margin-bottom: 3px !important; }
 /* The open-file button Paseo adds on hover is taller than the label; keep it from growing the row. */
 [data-testid="tool-call-open-file"] { margin-top: -4px !important; margin-bottom: -4px !important; }
 /* Expanded rows read like the plugin's: no filled header, children behind a 1px rule, details in a sunken block. */
 ${ROW} > button { background-color: transparent !important; border-color: transparent !important; border-radius: 6px !important; }
 :root[data-cp-rt-steps="full"] ${ROW} > button:hover { background-color: var(--cp-raised) !important; }
 /* Rows step back so the reply reads first: faded until hovered or opened (an open row's details follow its button), with no hover fill. Plugin rows do the same in views.tsx. */
-:root:not([data-cp-rt-steps="full"]) ${ROW} > button:last-child:not(:hover) { opacity: 0.55; }
+:root:not([data-cp-rt-steps="full"]) ${ROW} > button:last-child:not(:hover) { opacity: 0.45; }
 [data-testid="tool-call-badge"] > button > div > div:nth-child(2) > [dir]:nth-child(2) { color: var(--cp-muted) !important; }
 [data-testid="tool-call-group"] > div:nth-child(2) > div { max-height: none !important; }
 [data-testid="tool-call-group"] > div:nth-child(2) > div > div { padding: 4px 13px 0 41px !important; position: relative !important; }
@@ -718,6 +757,7 @@ const PARTS: Array<[string, (el: DomElement) => DomElement | null | undefined, s
   [`${PLAN} > button:first-child`, (el) => el, "plan-head"],
   ['[data-testid="chat-outline-preview"]', (el) => el, "outline-preview"],
   ['[data-testid="context-window-details"]', (el) => el, "context"],
+  ['[data-testid="turn-working-indicator"] > div > div:first-child > div > div', (el) => el, "loader"],
   // The vertical scroller of a tool call's details; its depth varies by tool.
   ['[data-testid="tool-call-badge"] > div:nth-child(2) [style*="max-height"]', (el) => el, "detail-scroll"],
 ];
@@ -725,6 +765,14 @@ const PARTS: Array<[string, (el: DomElement) => DomElement | null | undefined, s
 /** Tags the parts above, for selectors that would otherwise need :has() or a slow "X *". */
 function tagParts(roots: DomElement[]) {
   for (const [child, parentOf, part] of PARTS) for (const el of within(roots, child)) parentOf(el)?.setAttribute("data-cp-part", part);
+  // The working indicator's box gets an overlay the other loaders draw in; CSS shows it only when one is chosen.
+  for (const box of within(roots, WORKING_BOX)) {
+    if (box.querySelector(":scope > [data-cp-loader]")) continue;
+    const overlay = document.createElement("span");
+    overlay.setAttribute("data-cp-loader", "");
+    overlay.innerHTML = "<i></i>".repeat(9);
+    box.insertAdjacentElement("beforeend", overlay);
+  }
   for (const svg of within(roots, `${ROW_ICON} svg`)) {
     const slot = svg.closest(ROW_ICON);
     if (!slot) continue;
@@ -786,6 +834,12 @@ export function setCompactHandler(handler: (agentId: string) => Promise<void>) {
 const visible = (el: DomElement) => el.getBoundingClientRect().width > 0;
 
 /** The agent of the selected tab on screen. ponytail: with split panes this takes the first one; the meter's own pane would need Paseo to name its agent. */
+/** Agents with a tab in the window: the timelines merged steps follow. */
+export function openAgentIds(): string[] {
+  if (Platform.OS !== "web") return [];
+  return Array.from(document.querySelectorAll('[data-testid^="workspace-tab-agent_"]')).map((tab) => tab.getAttribute("data-testid")!.slice("workspace-tab-agent_".length));
+}
+
 function activeAgentId() {
   if (Platform.OS !== "web") return undefined;
   const tab = Array.from(document.querySelectorAll('[data-testid^="workspace-tab-agent_"][aria-selected="true"]')).find(visible);

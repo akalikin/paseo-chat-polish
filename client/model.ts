@@ -40,6 +40,8 @@ export type Tone = z.output<typeof tone>;
 
 export const planSchema = z.object({ text: z.string(), phase: z.enum(["streaming", "complete"]) });
 export const thoughtSchema = z.object({ text: z.string(), phase: z.enum(["streaming", "complete"]) });
+/** A merged run of steps, named by its first step's key (client/steps.ts holds the steps). */
+export const stepsSchema = z.object({ head: z.string() });
 export const todoSchema = z.object({
   items: z.array(z.object({ text: z.string(), status: z.enum(["pending", "in_progress", "completed"]) })),
 });

@@ -4,13 +4,14 @@ import { copyText, useToast, type ToastApi } from "@getpaseo/plugin/client/react
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { useEffect } from "react";
 import { Dashboard } from "./client/dashboard";
-import { hideableKind, imageData, turnMarkdown, imagesSchema, noticeData, noticeSchema, planSchema, thoughtSchema, todoData, todoSchema, toolData, toolSchema } from "./client/model";
+import { hideableKind, imageData, turnMarkdown, imagesSchema, noticeData, noticeSchema, planSchema, stepsSchema, thoughtSchema, todoData, todoSchema, toolData, toolSchema } from "./client/model";
+import { followAgent, onStaleSteps, placeStep, resetMade, setStepSkip, type Phase } from "./client/steps";
 import { currentPrefs, savePrefs, setPrefs, subscribePrefs, usePrefsSaver } from "./client/prefs";
 import { bindThemeRegistry, currentTheme, registerTheme } from "./client/theme-registry";
-import { bindPromptKeys, clampUserMessages, jumpToPrompt, paintSidebar, setCompactHandler, readHostAppearance, restyleNative, setNativeColors, setRailProviders, setRichText, watchDom } from "./client/web";
+import { bindPromptKeys, clampUserMessages, jumpToPrompt, openAgentIds, paintSidebar, setCompactHandler, readHostAppearance, restyleNative, setNativeColors, setRailProviders, setRichText, watchDom } from "./client/web";
 import { getTheme, THEME_CATALOG_ID, themeSchema } from "./shared/theme";
 import { getPrefs, type Prefs } from "./shared/timeline";
-import { ImagesItem, NoticeItem, PlanItem, RecapItem, ThoughtItem, TodoItem, ToolItem } from "./client/views";
+import { ImagesItem, NoticeItem, PlanItem, RecapItem, StepsItem, ThoughtItem, TodoItem, ToolItem } from "./client/views";
 import { recapSchema } from "./shared/recap";
 
 const KIND = "chat-polish";
@@ -76,6 +77,15 @@ export default function contribute(client: PluginClientContext) {
     items: [{ type: "plugin" as const, kind: `${KIND}-${kind}`, version: 1, data: JSON.parse(JSON.stringify(data)) as PluginTimelineData }],
   });
 
+  // Merged steps: the run's first step becomes one row, the rest leave the list; unknown steps render as before.
+  const merging = () => currentPrefs().merge === "on";
+  const stepRow = (item: Parameters<typeof placeStep>[0], phase: Phase) => {
+    if (!merging()) return undefined;
+    const placed = placeStep(item, phase);
+    if (!placed || placed.as === "plain") return undefined;
+    return placed.as === "none" ? { items: [] } : one("steps", { head: placed.key });
+  };
+
   // Transformers read prefs when they run; re-register when hiding or images change so Paseo re-transforms.
   const addTransformers = () => {
     const removers = [
@@ -86,6 +96,8 @@ export default function contribute(client: PluginClientContext) {
           const kind = hideableKind(item);
           if (kind && currentPrefs().hidden.includes(kind)) return { items: [] };
           if (item.detail.type === "plan") return one("plan", { text: item.detail.text, phase });
+          const merged = stepRow(item, phase);
+          if (merged) return merged;
           // Summary mode: leave calls native so Paseo can group them ("Ran 4 commands"); a plugin row would split the group.
           return readHostAppearance().toolCallDetail === "overview" ? undefined : one("tool", toolData(item));
         },
@@ -93,7 +105,7 @@ export default function contribute(client: PluginClientContext) {
       client.addTimelineTransformer({
         id: `${KIND}-reasoning`,
         query: { itemType: "reasoning" },
-        transform: ({ item, phase }) => one("thought", { text: item.text, phase }),
+        transform: ({ item, phase }) => stepRow(item, phase) ?? one("thought", { text: item.text, phase }),
       }),
       client.addTimelineTransformer({
         id: `${KIND}-images`,
@@ -110,21 +122,51 @@ export default function contribute(client: PluginClientContext) {
     return () => removers.forEach((r) => void r());
   };
   let removeTransformers = addTransformers();
-  const inputs = () => [currentPrefs().images, currentPrefs().hidden.join(), readHostAppearance().toolCallDetail].join("|");
+  const inputs = () => [currentPrefs().images, currentPrefs().hidden.join(), currentPrefs().merge, readHostAppearance().toolCallDetail].join("|");
   let transformedWith = inputs();
-  const retransform = () => {
-    if (inputs() === transformedWith) return;
+  const retransform = (force = false) => {
+    if (!force && inputs() === transformedWith) return;
     transformedWith = inputs();
     removeTransformers();
+    resetMade();
     removeTransformers = addTransformers();
   };
-  setRichText({ ...currentPrefs().richText, images: currentPrefs().images, steps: currentPrefs().steps });
+  // A step transformed before its run was known renders wrong until Paseo transforms again; batch those.
+  let staleTimer: ReturnType<typeof setTimeout> | undefined;
+  onStaleSteps(() => {
+    staleTimer ??= setTimeout(() => {
+      staleTimer = undefined;
+      retransform(true);
+    }, 150);
+  });
+  const skipHidden = () => setStepSkip((item) => item.type === "tool_call" && currentPrefs().hidden.includes(hideableKind(item)!));
+  skipHidden();
+  // Follows the timelines of agents with an open tab (none when merging is off, or on native, where tabs can't be read).
+  const followed = new Map<string, () => void>();
+  const follow = () => {
+    const open = new Set(merging() ? openAgentIds() : []);
+    for (const [id, stop] of followed) if (!open.has(id)) (stop(), followed.delete(id));
+    for (const id of open) if (!followed.has(id)) followed.set(id, followAgent(client.paseo, id));
+  };
+  // Prefs Paseo's own rows follow too reach the restyle as <html> attributes.
+  const markRoot = (p: Prefs) => setRichText({ ...p.richText, images: p.images, steps: p.steps, "icon-steps": p.rowIcons.steps === "hide" ? "hide" : "a", "icon-tool": p.rowIcons.tool === "hide" ? "hide" : "a", loader: p.loader === "dots" ? "a" : p.loader, "loader-size": p.loaderSize === "s" ? "a" : p.loaderSize });
+  markRoot(currentPrefs());
   const unsubscribePrefs = subscribePrefs(() => {
-    setRichText({ ...currentPrefs().richText, images: currentPrefs().images, steps: currentPrefs().steps });
+    markRoot(currentPrefs());
+    skipHidden();
     retransform();
+    follow();
   });
   // Paseo doesn't tell plugins when Tool call display changes; its settings screen re-renders, so check on DOM changes.
-  const unwatchHost = watchDom({ settled: retransform }, () => {});
+  const unwatchHost = watchDom(
+    {
+      settled: () => {
+        retransform();
+        follow();
+      },
+    },
+    () => {},
+  );
   client
     .rpc(getPrefs, {})
     .then(setPrefs)
@@ -136,6 +178,7 @@ export default function contribute(client: PluginClientContext) {
   client.addTimelineRenderer({ kind: `${KIND}-todo`, version: 1, schema: todoSchema, Component: TodoItem });
   client.addTimelineRenderer({ kind: `${KIND}-notice`, version: 1, schema: noticeSchema, Component: NoticeItem });
   client.addTimelineRenderer({ kind: `${KIND}-images`, version: 1, schema: imagesSchema, Component: ImagesItem });
+  client.addTimelineRenderer({ kind: `${KIND}-steps`, version: 1, schema: stepsSchema, Component: StepsItem });
   client.addTimelineRenderer({ kind: `${KIND}-recap`, version: 1, schema: recapSchema, Component: RecapItem });
 
   const unbindPromptKeys = bindPromptKeys();
@@ -166,7 +209,10 @@ export default function contribute(client: PluginClientContext) {
   // Toggle titles name what selecting them does, so they are re-added whenever prefs change.
   const toggles = (p: Prefs): Array<[string, string, string, Partial<Prefs>]> => {
     const hidesReads = p.hidden.includes("read") && p.hidden.includes("search");
+    const anyIcon = Object.values(p.rowIcons).includes("show");
     return [
+      ["merge", p.merge === "on" ? "Show each thought and tool call as its own row" : "Merge thoughts and tool calls between replies", "Layers", { merge: p.merge === "on" ? "off" : "on" }],
+      ["icons", anyIcon ? "Hide icons on thought and tool rows" : "Show icons on thought and tool rows", "Shapes", { rowIcons: anyIcon ? { steps: "hide", tool: "hide", thought: "hide" } : { steps: "show", tool: "show", thought: "show" } }],
       ["steps", p.steps === "faded" ? "Show thought and tool rows at full strength" : "Fade thought and tool rows", "Blend", { steps: p.steps === "faded" ? "full" : "faded" }],
       ["reads", hidesReads ? "Show finished reads and searches" : "Hide finished reads and searches", "EyeOff", { hidden: hidesReads ? p.hidden.filter((h) => h !== "read" && h !== "search") : [...new Set([...p.hidden, "read", "search"] as const)] }],
       ["recap", p.recap === "on" ? "Turn off turn recaps" : "Turn on turn recaps", "FileDiff", { recap: p.recap === "on" ? "off" : "on" }],
@@ -192,6 +238,8 @@ export default function contribute(client: PluginClientContext) {
     unbindPromptKeys();
     unsubscribePrefs();
     unwatchHost();
+    clearTimeout(staleTimer);
+    followed.forEach((stop) => stop());
     removeTransformers();
     unpaintSidebar();
     unclamp();

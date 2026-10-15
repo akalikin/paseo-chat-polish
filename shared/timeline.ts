@@ -10,6 +10,14 @@ export const RICH_TEXT = ["quote", "table", "code", "inline", "heading", "list",
 export type RichText = (typeof RICH_TEXT)[number];
 
 const variant = z.enum(["a", "b", "c"]).default("a");
+const shown = z.enum(["show", "hide"]).default("show");
+/** Working indicators the turn footer can show; "dots" is Paseo's own grid. */
+export const LOADERS = ["dots", "sparkle", "spokes", "dotring", "orb", "matrix", "snake"] as const;
+export type Loader = (typeof LOADERS)[number];
+
+/** Rows whose leading icon can be hidden. */
+export const ICON_KINDS = ["steps", "tool", "thought"] as const;
+export type IconKind = (typeof ICON_KINDS)[number];
 // Tables have a fourth style, "d" (grid).
 const tableVariant = z.enum(["a", "b", "c", "d"]).default("a");
 
@@ -24,9 +32,21 @@ export const prefsSchema = z.object({
   hidden: z.array(z.enum(HIDEABLE)).default([]),
   /** Long user messages: clamped to six lines with a fade (desktop), or shown in full. */
   userMessages: z.enum(["clamp", "full"]).default("clamp"),
-  /** Thought and tool rows: faded until hovered or opened, or full strength. "merged" (folding steps between replies) was
-   * removed because hiding items inside Paseo's virtualized list crashed it; saved values fall back to faded. */
+  /** Thought and tool rows: faded until hovered or opened, or full strength. An old "merged" value (it hid items inside Paseo's
+   * virtualized list and crashed it) falls back to faded; merging is now `merge`, which removes items instead. */
   steps: z.enum(["faded", "full"]).catch("faded"),
+  /** The icon at the start of merged, tool call and thought rows, per kind; hidden, a failed row's verb turns red instead.
+   * An older single "show" or "hide" applies to all three. */
+  rowIcons: z.preprocess(
+    (v) => (typeof v === "string" ? { steps: v, tool: v, thought: v } : v),
+    z.object({ steps: shown, tool: shown, thought: shown }).prefault({}),
+  ),
+  /** Each run of thoughts and tool calls between two replies folded into one row that opens to the steps (desktop and web). */
+  merge: z.enum(["on", "off"]).default("on"),
+  /** The working indicator in the turn footer: Paseo's six dots (animated smoothly) or another loader, and its size (14, 16 or 18pt).
+   * Desktop and web, with Paseo's own items restyled. */
+  loader: z.enum(LOADERS).default("dots"),
+  loaderSize: z.enum(["s", "m", "l"]).default("s"),
   /** Paseo's own items (tool call groups, bubbles, markdown) restyled to the design on desktop, or left as Paseo draws them. */
   nativeStyle: z.enum(["design", "paseo"]).default("design"),
   /** A recap row the daemon adds after each turn that changed files or had a failing command. */

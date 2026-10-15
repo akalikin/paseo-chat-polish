@@ -1,12 +1,15 @@
 import type { PluginTheme } from "@getpaseo/plugin";
-import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
+import { useAgent, useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Icon, Modal, ScrollView, useRevealedText } from "@getpaseo/plugin/client/react-native";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { AccessibilityInfo, Animated, Easing, Image, LayoutAnimation, Platform, Pressable, StyleSheet, Text, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
+import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import type { z } from "zod";
 import { readImage } from "../shared/image";
 import type { Recap } from "../shared/recap";
-import type { imagesSchema, noticeSchema, planSchema, thoughtSchema, todoSchema, ToolData, Tone } from "./model";
+import type { IconKind } from "../shared/timeline";
+import { toolData, type imagesSchema, type noticeSchema, type planSchema, type stepsSchema, type thoughtSchema, type todoSchema, type ToolData, type Tone } from "./model";
+import { runOf, runVersion, stepKey, stepSummary, subscribeRun } from "./steps";
 import { contrast, isHex } from "../shared/theme";
 import { highlight, highlightShell, highlightShellBlock, SYNTAX_THEMES, type Span, type SyntaxColors } from "./highlight";
 import { usePrefs } from "./prefs";
@@ -19,8 +22,11 @@ type Colors = PluginTheme["colors"];
 const MONO = Platform.select({ ios: "Menlo", android: "monospace", default: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" });
 const ICON_SLOT = 20;
 const INDENT = 28;
-// Paseo puts 16pt between timeline items; rows are 26pt tall, so -3 on each side gives the design's 36pt pitch.
-const TIGHT = { marginVertical: -3 };
+// Paseo puts 16pt between timeline items; rows are 26pt tall, so 6pt less gives the design's 36pt pitch. It comes off the top:
+// a reply block before a row keeps 12pt of bottom padding, so rows sat 12pt nearer the text below than the text above.
+const TIGHT = { marginTop: -9, marginBottom: 3 };
+/** How far faded thought and tool rows step back (Paseo's own rows match it in web.ts). */
+const QUIET = 0.45;
 
 function toneColor(c: Colors, tone: Tone | undefined) {
   if (tone === "success") return c.statusSuccess;
@@ -143,6 +149,22 @@ function usePulse(active: boolean) {
   return value;
 }
 
+/** Fade + 4px rise each time `key` changes after the first render, so a new label reads as the next step arriving. */
+function useSwap(key: string, active: boolean) {
+  const reduced = useReducedMotion();
+  const value = useRef(new Animated.Value(1)).current;
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) return void (first.current = false);
+    if (!active || reduced) return;
+    value.setValue(0.25);
+    const anim = Animated.timing(value, { toValue: 1, duration: 240, easing: Easing.out(Easing.cubic), useNativeDriver: NATIVE_DRIVER });
+    anim.start();
+    return () => anim.stop();
+  }, [key, active, reduced, value]);
+  return active ? { opacity: value, transform: [{ translateY: value.interpolate({ inputRange: [0, 1], outputRange: [4, 0] }) }] } : null;
+}
+
 /** Fade + 4px rise for rows born while the agent is live; history renders still. */
 function useEnter(live: boolean) {
   const [born] = useState(live);
@@ -182,14 +204,43 @@ interface RowProps {
   open?: boolean;
   onToggle?: () => void;
   compact: boolean;
+  /** Animate the label in whenever it changes (the merged row's label follows the live step). */
+  swap?: boolean;
+  /** Which "Row icons" choice hides this row's icon. */
+  kind: IconKind;
+}
+
+/** Left inset for a row's details: under the verb, past the icon when it shows. */
+function useIndent(kind: IconKind) {
+  return usePrefs().rowIcons[kind] === "hide" ? 0 : INDENT;
+}
+
+/** Shows `value` until its key changes, then keeps each new one up at least `hold` ms; changes inside the hold collapse into the latest,
+ * so a run that steps quickly reads as a few calm label changes instead of a flicker. */
+function useSteady<T>(value: T, key: string, hold: number): T {
+  const [shown, setShown] = useState({ key, value });
+  const since = useRef(0);
+  const latest = useRef(value);
+  latest.current = value;
+  useEffect(() => {
+    if (key === shown.key) return;
+    const timer = setTimeout(() => {
+      since.current = Date.now();
+      setShown({ key, value: latest.current });
+    }, Math.max(0, since.current + hold - Date.now()));
+    return () => clearTimeout(timer);
+  }, [key, shown.key, hold]);
+  return key === shown.key ? value : shown.value;
 }
 
 function Row(p: RowProps) {
   const s = useStyles(p.theme);
   const [hovered, setHovered] = useState(false);
   const pulse = usePulse(!!p.pulsing);
+  const swap = useSwap(`${p.verb}\n${p.target ?? ""}`, !!p.swap);
   const syntax = useSyntax(p.theme);
-  const { commandColors, steps } = usePrefs();
+  const { commandColors, steps, rowIcons } = usePrefs();
+  const bare = rowIcons[p.kind] === "hide";
   const c = p.theme.colors;
   const rotation = useTween(p.open ? 1 : 0, 200);
   const chevronOpacity = useTween(hovered || p.open || p.compact ? 0.7 : 0, 120);
@@ -204,21 +255,29 @@ function Row(p: RowProps) {
       accessibilityRole={p.onToggle ? "button" : undefined}
       accessibilityState={p.onToggle ? { expanded: !!p.open } : undefined}
       // Bleeds into the gutter so the hover surface (full-strength rows only; faded rows brighten instead) covers the same area as Paseo's own tool rows.
-      style={[s.row, { marginHorizontal: -13, paddingHorizontal: 13, borderRadius: 6 }, hovered && p.onToggle && steps === "full" ? { backgroundColor: c.surface1 } : null, quiet && { opacity: 0.55 }]}
+      style={[s.row, { marginHorizontal: -13, paddingHorizontal: 13, borderRadius: 6 }, hovered && p.onToggle && steps === "full" ? { backgroundColor: c.surface1 } : null, quiet && { opacity: QUIET }]}
     >
-      <View style={s.slot}>
-        <Icon name={p.icon} size={15} color={p.iconColor ?? c.foregroundMuted} />
-      </View>
-      <Animated.Text style={[s.verb, { opacity: pulse }]}>{p.verb}</Animated.Text>
-      {p.target ? (
-        <Text
-          numberOfLines={1}
-          ellipsizeMode="middle"
-          style={[s.target, p.mono && s.mono, hovered && { color: c.foreground }, p.struck && { textDecorationLine: "line-through" }]}
-        >
-          {p.shell && (p.open || commandColors === "always") && syntax ? colored(highlightShell(p.target), syntax) : p.target}
-        </Text>
-      ) : null}
+      {bare ? null : (
+        <View style={s.slot}>
+          <Icon name={p.icon} size={15} color={p.iconColor ?? c.foregroundMuted} />
+        </View>
+      )}
+      {/* Baseline, not center: the verb is in the content size and a mono target a point smaller, so centering left them a pixel apart. */}
+      <Animated.View style={[{ flexDirection: "row", alignItems: "baseline", gap: 8, flexShrink: 1, minWidth: 0 }, swap]}>
+        {/* One line: a long merged summary ends in "…" rather than wrapping the row; with a target, the target gives way instead. */}
+        <Animated.Text numberOfLines={1} style={[s.verb, { opacity: pulse, flexShrink: p.target ? 0 : 1 }, bare && p.iconColor ? { color: p.iconColor } : null]}>
+          {p.verb}
+        </Animated.Text>
+        {p.target ? (
+          <Text
+            numberOfLines={1}
+            ellipsizeMode="middle"
+            style={[s.target, p.mono && s.mono, hovered && { color: c.foreground }, p.struck && { textDecorationLine: "line-through" }]}
+          >
+            {p.shell && (p.open || commandColors === "always") && syntax ? colored(highlightShell(p.target), syntax) : p.target}
+          </Text>
+        ) : null}
+      </Animated.View>
       {p.meta ? <Text numberOfLines={1} style={[s.meta, p.metaColor ? { color: p.metaColor } : null]}>{p.meta}</Text> : <View style={{ flex: 1 }} />}
       {p.onToggle ? (
         <Animated.View
@@ -368,12 +427,14 @@ export function ToolItem({ item, theme, layout }: PluginTimelineItemProps<ToolDa
     if (auto) setOpen(true);
   }, [auto, setOpen]);
   const enter = useEnter(d.status === "running");
+  const indent = useIndent("tool");
   const c = theme.colors;
   return (
     <Animated.View style={[TIGHT, enter, d.status === "canceled" ? { opacity: 0.55 } : null]}>
       <Row
         theme={theme}
         compact={layout.compact}
+        kind="tool"
         icon={d.icon}
         iconColor={d.status === "failed" ? c.statusDanger : undefined}
         verb={d.verb}
@@ -388,16 +449,82 @@ export function ToolItem({ item, theme, layout }: PluginTimelineItemProps<ToolDa
         onToggle={d.detail ? toggle : undefined}
       />
       {d.error ? (
-        <Text style={[s.small, { color: c.statusDanger, paddingLeft: INDENT }]} numberOfLines={open ? undefined : 2}>
+        <Text style={[s.small, { color: c.statusDanger, paddingLeft: indent }]} numberOfLines={open ? undefined : 2}>
           {d.error}
         </Text>
       ) : null}
       {open && d.detail ? (
-        <FadeIn style={s.detail}>
+        <FadeIn style={[s.detail, { paddingLeft: indent }]}>
           <ToolDetail data={d.detail} theme={theme} />
         </FadeIn>
       ) : null}
     </Animated.View>
+  );
+}
+
+/** "41s", "2m 14s". */
+function duration(ms: number) {
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+/** A run of thoughts and tool calls folded into one row (design: Merged steps · A), its steps read from the timelines client/steps.ts follows. */
+export function StepsItem(props: PluginTimelineItemProps<z.output<typeof stepsSchema>>) {
+  const { head } = props.item.data;
+  const subscribe = useCallback((listener: () => void) => subscribeRun(head, listener), [head]);
+  useSyncExternalStore(subscribe, () => runVersion(head));
+  const { steps, ms, open: tail } = runOf(head);
+  const working = useAgent(props.agentId, (a) => a.status === "running") ?? false;
+  return <MergedSteps {...props} steps={steps} ms={ms} growing={!!tail && working} />;
+}
+
+/** The merged row. Done, it says what the run did and how long it took; working, it names the step in progress; a failed step turns
+ * the icon red. Open, it lists the steps as their own rows. A lone step renders as itself. The dashboard preview draws it from samples. */
+export function MergedSteps(
+  props: PluginTimelineItemProps<unknown> & { steps: Array<{ item: AgentTimelineItem; phase: "streaming" | "complete" }>; ms?: number; growing: boolean },
+) {
+  const { item, theme, layout, steps, ms, growing } = props;
+  const [open, toggle] = useDisclosure(false);
+  const icons = !!useIndent("steps");
+  const step = ({ item: step, phase }: (typeof steps)[number]) =>
+    step.type === "tool_call" ? (
+      <ToolItem key={stepKey(step)} {...props} item={{ ...item, data: toolData(step) }} />
+    ) : step.type === "reasoning" ? (
+      <ThoughtItem key={stepKey(step)} {...props} item={{ ...item, data: { text: step.text, phase } }} />
+    ) : null;
+  // The step in progress, or between steps of a run the agent is still adding to, the one just done (not the summary, which would flash).
+  const live = steps.findLast((s) => s.phase === "streaming" || (s.item.type === "tool_call" && s.item.status === "running")) ?? (growing ? steps.at(-1) : undefined);
+  const now = live?.item.type === "tool_call" ? toolData(live.item) : undefined;
+  const fresh = live
+    ? { verb: now?.verb ?? (live.phase === "streaming" ? "Thinking" : "Thought"), target: now?.target, mono: now?.mono, shell: now?.shell }
+    : { verb: stepSummary(steps.map((s) => s.item)) };
+  const label = useSteady(fresh, `${fresh.verb}\n${fresh.target ?? ""}`, 700);
+  if (steps.length < 2) return steps[0] ? step(steps[0]) : null;
+  const c = theme.colors;
+  const failed = steps.filter((s) => s.item.type === "tool_call" && s.item.status === "failed").length;
+  return (
+    <View style={TIGHT}>
+      <Row
+        theme={theme}
+        compact={layout.compact}
+        kind="steps"
+        icon="ListTree"
+        iconColor={failed ? c.statusDanger : undefined}
+        verb={label.verb}
+        target={label.target}
+        mono={label.mono}
+        shell={label.shell}
+        meta={failed ? `${failed} failed` : live ? `${steps.length} steps` : ms ? duration(ms) : undefined}
+        metaColor={failed ? c.statusDanger : undefined}
+        pulsing={!!live}
+        swap
+        open={open}
+        onToggle={toggle}
+      />
+      {open ? (
+        <FadeIn style={{ marginLeft: icons ? 9 : 0, paddingLeft: icons ? 15 : 13, paddingTop: 12, gap: 6, borderLeftWidth: 1, borderLeftColor: alpha(c.border, 0.6) }}>{steps.map(step)}</FadeIn>
+      ) : null}
+    </View>
   );
 }
 
@@ -409,11 +536,13 @@ export function ThoughtItem({ item, theme, layout }: PluginTimelineItemProps<z.o
   const streaming = item.data.phase === "streaming";
   const enter = useEnter(streaming);
   const text = useRevealedText(item.data.text, item.data.phase);
+  const inset = useIndent("thought") ? 9 : 0;
   return (
     <Animated.View style={[TIGHT, enter]}>
       <Row
         theme={theme}
         compact={layout.compact}
+        kind="thought"
         icon="Brain"
         verb={streaming ? "Thinking" : "Thought"}
         pulsing={streaming}
@@ -421,7 +550,7 @@ export function ThoughtItem({ item, theme, layout }: PluginTimelineItemProps<z.o
         onToggle={text.trim() ? toggle : undefined}
       />
       {open ? (
-        <FadeIn style={[s.detail, { paddingLeft: 9, paddingTop: 0 }]}>
+        <FadeIn style={[s.detail, { paddingLeft: inset, paddingTop: 0 }]}>
           <View style={[s.ruled, { gap: 10 }]}>
             {text
               .trim()
@@ -611,7 +740,8 @@ function Thumbnail({ alt, url, theme }: { alt: string; url: string; theme: Plugi
 
 export function ImagesItem({ item, theme }: PluginTimelineItemProps<z.output<typeof imagesSchema>>) {
   return (
-    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, paddingVertical: 4 }}>
+    // Rows come 9pt up and leave 3pt below (TIGHT), so thumbnails between two rows keep the room below: 19pt each side.
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, paddingBottom: 12 }}>
       {item.data.images.map((img, i) => (
         <Thumbnail key={i} alt={img.alt} url={img.url} theme={theme} />
       ))}
@@ -667,7 +797,7 @@ export function RecapItem({ item, theme }: PluginTimelineItemProps<Recap>) {
       </View>,
     );
   return (
-    <View style={TIGHT}>
+    <View style={{ marginVertical: -3 }}>
       <Pressable
         onPress={toggle}
         onHoverIn={() => setHovered(true)}

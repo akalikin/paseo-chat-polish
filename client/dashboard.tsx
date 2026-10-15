@@ -5,12 +5,12 @@ import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import { useEffect, useState, type ReactNode } from "react";
 import { Image, Pressable, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
 import { contrast, isHex, PRESETS, THEME_CATALOG_ID, themeSchema, themeSettings, TOKEN_ROLES, TOKENS, type ThemeDraft, type Token } from "../shared/theme";
-import { HIDEABLE, prefsSettings, RICH_TEXT, type Hideable, type Prefs, type RichText } from "../shared/timeline";
+import { HIDEABLE, ICON_KINDS, prefsSettings, RICH_TEXT, type Hideable, type IconKind, type Loader, type Prefs, type RichText } from "../shared/timeline";
 import { hideableKind, toolData } from "./model";
 import { PrefsOverride, setPrefs, usePrefs } from "./prefs";
 import { registerTheme, useCurrentTheme } from "./theme-registry";
 import { highlightShell, PLAIN_SYNTAX, SYNTAX_THEMES } from "./highlight";
-import { alpha, ImagesItem, sunken, SyntaxOverride, ThoughtItem, ToolItem, useStyles } from "./views";
+import { alpha, ImagesItem, MergedSteps, sunken, SyntaxOverride, ThoughtItem, ToolItem, useStyles } from "./views";
 import { canSetAppTheme, readHostAppearance, readSyntaxTheme, setAppTheme, updateAppSettings } from "./web";
 
 type ToolCall = Extract<AgentTimelineItem, { type: "tool_call" }>;
@@ -441,6 +441,22 @@ const HIDEABLE_LABELS: Record<Hideable, [string, string]> = {
   task: ["Background tasks", "Finished background task notices"],
 };
 
+const LOADER_OPTIONS: Array<[Loader, string, string, boolean?]> = [
+  ["dots", "Dots", "Paseo's 2 × 3 grid, chasing smoothly", true],
+  ["sparkle", "Sparkle", "A star that grows · ✢ ✳ ✶ ✻ ✽ and back, in the accent color"],
+  ["spokes", "Spokes", "Eight spokes with a fading tail, like macOS"],
+  ["dotring", "Dot ring", "Eight dots round a circle with a fading tail"],
+  ["orb", "Orb", "A soft accent orb that breathes and glows"],
+  ["matrix", "Matrix ripple", "A 3 × 3 dot grid, rippling out from the center"],
+  ["snake", "Snake", "A dot snake winding through a 3 × 3 grid"],
+];
+
+const ICON_LABELS: Record<IconKind, [string, string]> = {
+  steps: ["Merged rows", "A list-tree icon before “Thought 2 times, ran 3 commands”"],
+  tool: ["Tool calls", "A terminal, pencil, eye or wrench per tool"],
+  thought: ["Thoughts", "A brain before Thinking and Thought"],
+};
+
 /** Labels and hints for each rich text variant, from the "Rich Text — Style Variants" design. */
 const RICH_TEXT_OPTIONS: Record<RichText, { title: string; description: string; options: Array<[string, string]> }> = {
   quote: { title: "Blockquote", description: "Quoted text (> …).", options: [["Accent bar", "2px accent rule, muted italic text"], ["Tinted card", "Raised fill with a quote mark; reads as an aside"], ["Italic indent", "No rule, just indented italic text"]] },
@@ -455,6 +471,7 @@ const RICH_TEXT_OPTIONS: Record<RichText, { title: string; description: string; 
 
 function PrefsEditor({ theme, page, prefs, onChange }: { theme: PluginTheme; page: Exclude<Page, "theme">; prefs: Prefs; onChange(p: Prefs): void }) {
   const set = <K extends keyof Prefs>(key: K) => (value: Prefs[K]) => onChange({ ...prefs, [key]: value });
+  const st = useStyles(theme);
   if (page === "messages") {
     const paseoSyntax = readSyntaxTheme();
     return (
@@ -469,6 +486,36 @@ function PrefsEditor({ theme, page, prefs, onChange }: { theme: PluginTheme; pag
               ["full", "Show in full", "Every line, always", true],
             ]}
           />
+        </Section>
+        <Section theme={theme} title="Steps between replies" description="Thoughts and tool calls the agent makes before it answers.">
+          <Choice
+            theme={theme}
+            value={prefs.merge}
+            onChange={set("merge")}
+            options={[
+              ["on", "Merge into one row", "“Thought 2 times, ran 3 commands” · open it to see each step"],
+              ["off", "One row per step", "Paseo still groups tool calls in summary mode", true],
+            ]}
+          />
+        </Section>
+        <Section theme={theme} title="Row icons" description="The icon at the start of each kind of row. Without it, a row starts with its verb and a failed step's verb turns red.">
+          <View style={group(theme.colors)}>
+            {ICON_KINDS.map((k, i) => {
+              const shown = prefs.rowIcons[k] === "show";
+              return (
+                <OptionRow
+                  key={k}
+                  theme={theme}
+                  kind="checkbox"
+                  on={shown}
+                  label={ICON_LABELS[k][0]}
+                  hint={ICON_LABELS[k][1]}
+                  first={!i}
+                  onPress={() => onChange({ ...prefs, rowIcons: { ...prefs.rowIcons, [k]: shown ? "hide" : "show" } })}
+                />
+              );
+            })}
+          </View>
         </Section>
         <Section theme={theme} title="Thoughts and tool calls" description="How loud the rows between replies are.">
           <Choice
@@ -492,6 +539,24 @@ function PrefsEditor({ theme, page, prefs, onChange }: { theme: PluginTheme; pag
                 ["paseo", "Leave untouched", "Draw them the way Paseo does", true],
               ]}
             />
+          </Section>
+        ) : null}
+        {canSetAppTheme ? (
+          <Section theme={theme} title="Working indicator" description="The loader in the turn footer while the agent works. Needs Paseo's own items to match the design." desktop>
+            <Choice theme={theme} value={prefs.loader} onChange={set("loader")} options={LOADER_OPTIONS} />
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+              <Text style={[st.small, { fontSize: 13 }]}>Size</Text>
+              <Segmented
+                theme={theme}
+                value={prefs.loaderSize}
+                onChange={set("loaderSize")}
+                options={[
+                  ["s", "Minus", "14 · Paseo"],
+                  ["m", "Equal", "16"],
+                  ["l", "Plus", "18"],
+                ]}
+              />
+            </View>
           </Section>
         ) : null}
         <Section theme={theme} title="Images" description="Replies that only contain images.">
@@ -637,6 +702,26 @@ function PreviewBubble({ theme, clamp }: { theme: PluginTheme; clamp: boolean })
   );
 }
 
+/** The turn footer while the agent works, with a box the restyle draws the chosen loader in (Paseo's 2 × 3 grid at size 14 underneath). */
+function PreviewWorking({ theme }: { theme: PluginTheme }) {
+  const s = useStyles(theme);
+  const c = theme.colors;
+  const dot = 10 / 3;
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
+      <View {...({ dataSet: { cpPart: "loader" } } as object)} style={{ width: 14, height: 14, alignItems: "center", justifyContent: "center" }}>
+        <View style={{ width: dot * 2 + 2, height: 14 }}>
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <View key={i} style={{ position: "absolute", left: (i % 2) * (dot + 2), top: Math.floor(i / 2) * (dot + 2), width: dot, height: dot, borderRadius: dot / 2, backgroundColor: c.foreground, opacity: 0.6 }} />
+          ))}
+        </View>
+      </View>
+      <Icon name="Split" size={14} color={c.foregroundMuted} />
+      <Text style={[s.small, { fontSize: 12 }]}>12s</Text>
+    </View>
+  );
+}
+
 type Viewport = "desktop" | "phone";
 
 function PreviewHead({ theme, layout, viewport, setViewport }: { theme: PluginTheme; layout: PluginScreenProps["layout"]; viewport: Viewport; setViewport(v: Viewport): void }) {
@@ -714,7 +799,9 @@ function Preview({ theme, draft, prefs, layout }: { theme: PluginTheme; draft: T
   const item = <T,>(data: T) => ({ type: "plugin" as const, kind: "preview", version: 1, data });
   // Rows read their open state once; remount them when a pref that sets it changes.
   const remount = `${prefs.reasoning}-${prefs.toolDetails}`;
-  const tools = PREVIEW_CALLS.filter((t) => !prefs.hidden.includes(hideableKind(t)!)).map(toolData);
+  const calls = PREVIEW_CALLS.filter((t) => !prefs.hidden.includes(hideableKind(t)!));
+  const tools = calls.map(toolData);
+  const thought = "Handlers in routes/ each call verifyToken(); one middleware removes the duplicates.";
 
   return (
     <PrefsOverride.Provider value={prefs}>
@@ -723,10 +810,23 @@ function Preview({ theme, draft, prefs, layout }: { theme: PluginTheme; draft: T
           <PreviewHead theme={theme} layout={layout} viewport={viewport} setViewport={setViewport} />
           <MockChat theme={pt} layout={layout} viewport={viewport}>
             <PreviewBubble theme={pt} clamp={prefs.userMessages === "clamp"} />
-            <ThoughtItem key={`thought-${remount}`} {...props} item={item({ text: "Handlers in routes/ each call verifyToken(); one middleware removes the duplicates.", phase: "complete" as const })} />
-            {tools.map((d) => (
-              <ToolItem key={`${d.verb}-${d.target}-${remount}`} {...props} item={item(d)} />
-            ))}
+            {prefs.merge === "on" ? (
+              <MergedSteps
+                key={`steps-${remount}`}
+                {...props}
+                item={item(null)}
+                steps={[{ type: "reasoning" as const, text: thought }, ...calls].map((item) => ({ item, phase: "complete" as const }))}
+                ms={41000}
+                growing={false}
+              />
+            ) : (
+              <>
+                <ThoughtItem key={`thought-${remount}`} {...props} item={item({ text: thought, phase: "complete" as const })} />
+                {tools.map((d) => (
+                  <ToolItem key={`${d.verb}-${d.target}-${remount}`} {...props} item={item(d)} />
+                ))}
+              </>
+            )}
             <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 5, paddingTop: 8 }}>
               <Text style={[ps.prose, { color: pc.foreground }]}>Done. Auth now lives in</Text>
               <InlineCode theme={pt} variant={prefs.richText.inline}>
@@ -734,6 +834,7 @@ function Preview({ theme, draft, prefs, layout }: { theme: PluginTheme; draft: T
               </InlineCode>
               <Text style={[ps.prose, { color: pc.foreground }]}>and all 24 tests pass.</Text>
             </View>
+            <PreviewWorking theme={pt} />
             {prefs.images === "native" ? (
               <Image source={{ uri: PREVIEW_IMAGE }} style={{ width: "100%", aspectRatio: 16 / 10, borderRadius: 8 }} resizeMode="cover" />
             ) : (
@@ -1082,7 +1183,7 @@ function ThemePage({ theme, layout }: Pick<PluginScreenProps, "theme" | "layout"
 }
 
 const PAGE_SUBTITLES: Record<Exclude<Page, "theme">, string> = {
-  messages: "Long user messages, images in replies, and how Paseo draws text and code.",
+  messages: "Long user messages, the steps between replies and their icons, images in replies, and how Paseo draws text and code.",
   rich: "One style per markdown element in Paseo's replies. A is the base design.",
   reasoning: "Whether thinking starts open or as a quiet row.",
   tools: "What tool rows show, and which ones appear at all.",

@@ -152,7 +152,9 @@ test("hideable kinds: only completed reads, searches, fetches and background tas
   assert.equal(hideableKind(tool({ type: "read", filePath: "a.ts" }, { status: "failed" })), undefined);
   assert.equal(hideableKind(tool({ type: "read", filePath: "a.ts" }, { status: "running" })), undefined);
   assert.equal(hideableKind(tool({ type: "shell", command: "ls" })), undefined);
-  assert.deepEqual(prefsSchema.parse({}), { reasoning: "paseo", toolDetails: "collapsed", commandColors: "expanded", hidden: [], userMessages: "clamp", steps: "faded", nativeStyle: "design", recap: "on", images: "small", richText: { quote: "a", table: "a", code: "a", inline: "a", heading: "a", list: "a", callout: "a", rule: "a" } });
+  assert.deepEqual(prefsSchema.parse({}), { reasoning: "paseo", toolDetails: "collapsed", commandColors: "expanded", hidden: [], userMessages: "clamp", steps: "faded", rowIcons: { steps: "show", tool: "show", thought: "show" }, merge: "on", loader: "dots", loaderSize: "s", nativeStyle: "design", recap: "on", images: "small", richText: { quote: "a", table: "a", code: "a", inline: "a", heading: "a", list: "a", callout: "a", rule: "a" } });
+  // A saved single choice from before icons were per kind applies to all three.
+  assert.deepEqual(prefsSchema.parse({ rowIcons: "hide" }).rowIcons, { steps: "hide", tool: "hide", thought: "hide" });
   // Saved prefs from before rich text variants still load, with each element on its base style.
   assert.equal(prefsSchema.parse({ images: "large" }).richText.callout, "a");
   assert.equal(prefsSchema.parse({ richText: { table: "c" } }).richText.table, "c");
@@ -200,4 +202,33 @@ test("turn as Markdown: quoted prompt, reply, then changes from the recap", asyn
   );
   assert.equal(md, "> fix it\n> please\n\nFixed.\n\nDone.\n\n**Changes** · 1 file +1 −1 · 1 command · 1 failed\n- `a.ts` +1 −1\n- ✗ `npm test`");
   assert.equal(turnMarkdown([{ type: "assistant_message", text: "hi" }], "/w"), undefined);
+});
+
+test("steps: runs split on replies, fold tool updates and thought chunks, skip hidden steps, time the run", async () => {
+  const { applyItem, stepRuns, stepKey, stepSummary } = await import("../client/steps.ts");
+  const list = [{ item: { type: "user_message", text: "go" }, at: 1000 }];
+  let at = 1000;
+  for (const item of [
+    { type: "reasoning", text: "Let me " },
+    { type: "reasoning", text: "look." },
+    tool({ type: "shell", command: "ls" }, { callId: "a", status: "running" }),
+    tool({ type: "unknown", input: null, output: null }, { callId: "a" }),
+    tool({ type: "read", filePath: "x.ts" }, { callId: "b" }),
+    { type: "assistant_message", text: "Done" },
+    { type: "assistant_message", text: " here" },
+    tool({ type: "edit", filePath: "x.ts", oldString: "a", newString: "b" }, { callId: "c" }),
+  ]) applyItem(list, item, (at += 1000));
+  assert.equal(list.length, 6);
+  assert.equal(list[1].item.text, "Let me look.");
+  assert.equal(list[2].item.detail.type, "shell");
+  assert.equal(list[2].item.status, "completed");
+  const runs = stepRuns(list, (item) => item.detail?.type === "read");
+  assert.deepEqual(runs.map((r) => r.steps.map(stepKey)), [["r:Let me look.", "t:a"], ["t:c"]]);
+  // From the user message (1s) to the shell call's completion (5s); the second run starts when the reply's last chunk arrived (8s).
+  assert.deepEqual(runs.map((r) => r.ms), [4000, 1000]);
+  // Only the run nothing has followed yet can still grow.
+  assert.deepEqual(runs.map((r) => r.open), [false, true]);
+  assert.equal(stepSummary(runs[0].steps), "Thought 1 time and ran 1 command");
+  assert.equal(stepSummary(list.map((e) => e.item)), "Thought 1 time, edited 1 file, ran 1 command, and read 1 file");
+  assert.equal(stepSummary([tool({ type: "unknown", input: null, output: null }, { name: "mcp__paseo__browser_click" }), tool({ type: "unknown", input: null, output: null }, { name: "WebSearch" })]), "Used 1 other tool and called Paseo 1 time");
 });

@@ -152,7 +152,7 @@ test("hideable kinds: only completed reads, searches, fetches and background tas
   assert.equal(hideableKind(tool({ type: "read", filePath: "a.ts" }, { status: "failed" })), undefined);
   assert.equal(hideableKind(tool({ type: "read", filePath: "a.ts" }, { status: "running" })), undefined);
   assert.equal(hideableKind(tool({ type: "shell", command: "ls" })), undefined);
-  assert.deepEqual(prefsSchema.parse({}), { reasoning: "paseo", toolDetails: "collapsed", commandColors: "expanded", hidden: [], userMessages: "clamp", steps: "faded", rowIcons: { steps: "show", tool: "show", thought: "show" }, merge: "on", loader: "dots", loaderSize: "s", nativeStyle: "design", recap: "on", images: "small", richText: { quote: "a", table: "a", code: "a", inline: "a", heading: "a", list: "a", callout: "a", rule: "a" } });
+  assert.deepEqual(prefsSchema.parse({}), { reasoning: "paseo", toolDetails: "collapsed", commandColors: "expanded", hidden: [], userMessages: "clamp", steps: "faded", selectionCopy: "on", density: "normal", rowIcons: { steps: "show", tool: "show", thought: "show" }, merge: "on", loader: "dots", loaderSize: "s", nativeStyle: "design", recap: "on", images: "small", richText: { quote: "a", table: "a", code: "a", inline: "a", heading: "a", list: "a", callout: "a", rule: "a" } });
   // A saved single choice from before icons were per kind applies to all three.
   assert.deepEqual(prefsSchema.parse({ rowIcons: "hide" }).rowIcons, { steps: "hide", tool: "hide", thought: "hide" });
   // Saved prefs from before rich text variants still load, with each element on its base style.
@@ -231,4 +231,89 @@ test("steps: runs split on replies, fold tool updates and thought chunks, skip h
   assert.equal(stepSummary(runs[0].steps), "Thought 1 time and ran 1 command");
   assert.equal(stepSummary(list.map((e) => e.item)), "Thought 1 time, edited 1 file, ran 1 command, and read 1 file");
   assert.equal(stepSummary([tool({ type: "unknown", input: null, output: null }, { name: "mcp__paseo__browser_click" }), tool({ type: "unknown", input: null, output: null }, { name: "WebSearch" })]), "Used 1 other tool and called Paseo 1 time");
+});
+
+test("untyped tools read as words: MCP server › tool, known built-ins, labels as targets, search text", () => {
+  const unknown = (name, input = null, output = null, extra = {}) => toolData(tool({ type: "unknown", input, output }, { name, ...extra }));
+  assert.deepEqual([unknown("mcp__github__create_issue").target, unknown("mcp__github__create_issue").icon], ["github › Create issue", "Blocks"]);
+  assert.deepEqual([unknown("mcp__paseo__create_agent").target, unknown("mcp__paseo__create_agent").icon], ["Create agent", "Bot"]);
+  assert.deepEqual([unknown("mcp__paseo__browser_reload").icon, unknown("paseo.capture_terminal").icon, unknown("mcp__paseo__create_schedule").icon], ["AppWindow", "SquareTerminal", "CalendarClock"]);
+  assert.equal(unknown("github.create_issue").target, "github › Create issue");
+  const ask = unknown("AskUserQuestion", { description: "Pick one\nmore" }, null, { status: "running" });
+  assert.deepEqual([ask.verb, ask.target, ask.icon], ["Asking", "Pick one", "MessageCircleQuestion"]);
+  const speak = unknown("speak", "Hello there");
+  assert.deepEqual([speak.verb, speak.target, speak.detail], ["Spoke", "Hello there", undefined]);
+  assert.equal(unknown("SomeNewTool").target, "Some new tool");
+  const skill = toolData(tool({ type: "plain_text", label: "paseo-plugin" }, { name: "Skill" }));
+  assert.deepEqual([skill.verb, skill.target], ["Used skill", "paseo-plugin"]);
+  const term = toolData(tool({ type: "plain_text", label: "npm test" }, { name: "terminal" }));
+  assert.deepEqual([term.verb, term.target, term.shell], ["Ran", "npm test", true]);
+  assert.equal(toolData(tool({ type: "plain_text", label: "Switching mode" }, { name: "switch_mode" })).verb, "Switch mode");
+  const grep = toolData(tool({ type: "search", query: "foo", toolName: "grep", content: "a.ts:1: foo" }));
+  assert.deepEqual(grep.detail, { kind: "text", text: "a.ts:1: foo" });
+  for (const d of [ask, speak, skill, term, grep]) assert.ok(toolSchema.safeParse(d).success);
+});
+
+test("steps: Claude's task tools are passed over, todo-list calls and agent messages end a run", async () => {
+  const { stepRuns, stepKey } = await import("../client/steps.ts");
+  const entries = [
+    tool({ type: "unknown", input: null, output: null }, { callId: "t1", name: "TaskUpdate" }),
+    tool({ type: "shell", command: "ls" }, { callId: "a" }),
+    tool({ type: "unknown", input: null, output: null }, { callId: "t2", name: "TaskCreate" }),
+    tool({ type: "read", filePath: "x.ts" }, { callId: "b" }),
+    tool({ type: "unknown", input: null, output: null }, { callId: "w", name: "TodoWrite" }),
+    tool({ type: "shell", command: "pwd" }, { callId: "c" }),
+    tool({ type: "plain_text", text: "hi" }, { callId: "m", name: "agent_message" }),
+  ].map((item, i) => ({ item, at: i }));
+  assert.deepEqual(stepRuns(entries, () => false).map((r) => r.steps.map(stepKey)), [["t:a", "t:b"], ["t:c"]]);
+});
+
+test("steps: a step transformed before its timeline catches up leads its run in place, with no re-transform", async () => {
+  const { followAgent, onStaleSteps, onUnplacedStep, placeStep } = await import("../client/steps.ts");
+  let handler;
+  let resolveReady;
+  const subscription = Object.assign(() => {}, { ready: new Promise((r) => (resolveReady = r)) });
+  const paseo = {
+    agents: {
+      ref: () => ({
+        timeline: {
+          refetch: async () => ({ entries: [{ item: { type: "user_message", text: "go" }, timestamp: new Date(0).toISOString() }], endCursor: { seq: 0 } }),
+          subscribe: (h) => ((handler = h), subscription),
+        },
+      }),
+    },
+  };
+  let stale = 0;
+  let unplaced = 0;
+  onStaleSteps(() => stale++);
+  onUnplacedStep(() => unplaced++);
+  const stop = followAgent(paseo, "agent");
+  resolveReady();
+  await new Promise((r) => setTimeout(r, 0));
+  const send = (item, seq) => handler({ seq, timestamp: new Date().toISOString(), event: { type: "timeline", item } });
+  const a = tool({ type: "shell", command: "ls" }, { callId: "a", status: "running" });
+  const b = tool({ type: "shell", command: "pwd" }, { callId: "b", status: "running" });
+  // Paseo renders the first call before the plugin's own event arrives: it leads a run of one.
+  assert.deepEqual(placeStep(a, "streaming"), { key: "t:a", as: "head" });
+  assert.equal(unplaced, 1);
+  send(a, 1);
+  send(b, 2);
+  // The second joins it; the first row grows into the merged row without Paseo transforming again.
+  assert.deepEqual(placeStep(b, "streaming"), { key: "t:b", as: "none" });
+  assert.equal(stale, 0);
+  // Only a step that turns out not to lead its run needs a fresh transform.
+  const c = tool({ type: "shell", command: "id" }, { callId: "c", status: "running" });
+  assert.equal(placeStep(c, "streaming").as, "head");
+  send(c, 3);
+  assert.equal(stale, 1);
+  stop();
+});
+
+test("css guard: positional selectors get a :where() precheck on their subject, others are left alone", async () => {
+  const { guardPositional } = await import("../client/css-guard.ts");
+  assert.equal(guardPositional('[data-x] > div'), '[data-x] > div');
+  assert.equal(guardPositional('[data-x] > div > div:first-child'), '[data-x] > div > div:where([data-x] > div > div):first-child');
+  assert.equal(guardPositional('[data-x] > :last-child *'), '[data-x] > :last-child *:where([data-x] >  *)');
+  assert.equal(guardPositional('[data-x] div:nth-child(2)::before'), '[data-x] div:where([data-x] div):nth-child(2)::before');
+  assert.equal(guardPositional('[a="b c"] > p:not(:last-child)'), '[a="b c"] > p:where([a="b c"] > p):not(:last-child)');
 });

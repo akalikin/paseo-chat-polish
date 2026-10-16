@@ -5,10 +5,10 @@ import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { useEffect } from "react";
 import { Dashboard } from "./client/dashboard";
 import { hideableKind, imageData, turnMarkdown, imagesSchema, noticeData, noticeSchema, planSchema, stepsSchema, thoughtSchema, todoData, todoSchema, toolData, toolSchema } from "./client/model";
-import { followAgent, onStaleSteps, placeStep, resetMade, setStepSkip, type Phase } from "./client/steps";
+import { followAgent, onStaleSteps, onUnplacedStep, placeStep, resetMade, setStepSkip, type Phase } from "./client/steps";
 import { currentPrefs, savePrefs, setPrefs, subscribePrefs, usePrefsSaver } from "./client/prefs";
 import { bindThemeRegistry, currentTheme, registerTheme } from "./client/theme-registry";
-import { bindPromptKeys, clampUserMessages, jumpToPrompt, openAgentIds, paintSidebar, setCompactHandler, readHostAppearance, restyleNative, setNativeColors, setRailProviders, setRichText, watchDom } from "./client/web";
+import { bindPromptKeys, clampUserMessages, jumpToPrompt, openAgentIds, paintSidebar, setCompactHandler, readHostAppearance, restyleNative, selectionCopyMenu, setNativeColors, setRailProviders, setRichText, watchDom } from "./client/web";
 import { getTheme, THEME_CATALOG_ID, themeSchema } from "./shared/theme";
 import { getPrefs, type Prefs } from "./shared/timeline";
 import { ImagesItem, NoticeItem, PlanItem, RecapItem, StepsItem, ThoughtItem, TodoItem, ToolItem } from "./client/views";
@@ -42,11 +42,12 @@ export default function contribute(client: PluginClientContext) {
   const unpaintSidebar = paintSidebar(() => {
     const theme = currentTheme();
     const active = readHostAppearance().pluginThemeId === THEME_CATALOG_ID;
-    return active && theme?.sidebar ? { sidebar: theme.sidebar, background: theme.colors.background } : undefined;
+    return active && theme?.sidebar ? { sidebar: theme.sidebar } : undefined;
   });
 
   const unrestyle = restyleNative(() => currentPrefs().nativeStyle === "design");
   const unclamp = clampUserMessages(() => currentPrefs().userMessages === "clamp");
+  const unselect = selectionCopyMenu(() => currentPrefs().selectionCopy === "on");
 
   // The composer's model selector rail lists every provider, which Paseo only renders for new chats.
   const loadProviders = () =>
@@ -82,7 +83,7 @@ export default function contribute(client: PluginClientContext) {
   const stepRow = (item: Parameters<typeof placeStep>[0], phase: Phase) => {
     if (!merging()) return undefined;
     const placed = placeStep(item, phase);
-    if (!placed || placed.as === "plain") return undefined;
+    if (!placed) return undefined;
     return placed.as === "none" ? { items: [] } : one("steps", { head: placed.key });
   };
 
@@ -95,6 +96,8 @@ export default function contribute(client: PluginClientContext) {
         transform: ({ item, phase }) => {
           const kind = hideableKind(item);
           if (kind && currentPrefs().hidden.includes(kind)) return { items: [] };
+          // Like Paseo: the approval card shows a pending plan, so the call itself stays out of the chat until resolved.
+          if (item.name === "ExitPlanMode" || (item.name === "plan_approval" && item.status === "running")) return { items: [] };
           if (item.detail.type === "plan") return one("plan", { text: item.detail.text, phase });
           const merged = stepRow(item, phase);
           if (merged) return merged;
@@ -137,7 +140,7 @@ export default function contribute(client: PluginClientContext) {
     staleTimer ??= setTimeout(() => {
       staleTimer = undefined;
       retransform(true);
-    }, 150);
+    }, 50);
   });
   const skipHidden = () => setStepSkip((item) => item.type === "tool_call" && currentPrefs().hidden.includes(hideableKind(item)!));
   skipHidden();
@@ -148,8 +151,18 @@ export default function contribute(client: PluginClientContext) {
     for (const [id, stop] of followed) if (!open.has(id)) (stop(), followed.delete(id));
     for (const id of open) if (!followed.has(id)) followed.set(id, followAgent(client.paseo, id));
   };
+  // A step from a tab opened since the last DOM settle: start following now, after Paseo's render, rather than up to 250ms later.
+  let followQueued = false;
+  onUnplacedStep(() => {
+    if (followQueued) return;
+    followQueued = true;
+    queueMicrotask(() => {
+      followQueued = false;
+      follow();
+    });
+  });
   // Prefs Paseo's own rows follow too reach the restyle as <html> attributes.
-  const markRoot = (p: Prefs) => setRichText({ ...p.richText, images: p.images, steps: p.steps, "icon-steps": p.rowIcons.steps === "hide" ? "hide" : "a", "icon-tool": p.rowIcons.tool === "hide" ? "hide" : "a", loader: p.loader === "dots" ? "a" : p.loader, "loader-size": p.loaderSize === "s" ? "a" : p.loaderSize });
+  const markRoot = (p: Prefs) => setRichText({ ...p.richText, images: p.images, steps: p.steps, density: p.density === "normal" ? "a" : p.density, "icon-steps": p.rowIcons.steps === "hide" ? "hide" : "a", "icon-tool": p.rowIcons.tool === "hide" ? "hide" : "a", loader: p.loader === "dots" ? "a" : p.loader, "loader-size": p.loaderSize === "s" ? "a" : p.loaderSize });
   markRoot(currentPrefs());
   const unsubscribePrefs = subscribePrefs(() => {
     markRoot(currentPrefs());
@@ -213,8 +226,9 @@ export default function contribute(client: PluginClientContext) {
     return [
       ["merge", p.merge === "on" ? "Show each thought and tool call as its own row" : "Merge thoughts and tool calls between replies", "Layers", { merge: p.merge === "on" ? "off" : "on" }],
       ["icons", anyIcon ? "Hide icons on thought and tool rows" : "Show icons on thought and tool rows", "Shapes", { rowIcons: anyIcon ? { steps: "hide", tool: "hide", thought: "hide" } : { steps: "show", tool: "show", thought: "show" } }],
-      ["steps", p.steps === "faded" ? "Show thought and tool rows at full strength" : "Fade thought and tool rows", "Blend", { steps: p.steps === "faded" ? "full" : "faded" }],
+      ["steps", p.steps !== "full" ? "Show thought and tool rows at full strength" : "Fade thought and tool rows", "Blend", { steps: p.steps !== "full" ? "full" : "faded" }],
       ["reads", hidesReads ? "Show finished reads and searches" : "Hide finished reads and searches", "EyeOff", { hidden: hidesReads ? p.hidden.filter((h) => h !== "read" && h !== "search") : [...new Set([...p.hidden, "read", "search"] as const)] }],
+      ["copy", p.selectionCopy === "on" ? "Turn off the copy popup on selected text" : "Turn on the copy popup on selected text", "ClipboardCopy", { selectionCopy: p.selectionCopy === "on" ? "off" : "on" }],
       ["recap", p.recap === "on" ? "Turn off turn recaps" : "Turn on turn recaps", "FileDiff", { recap: p.recap === "on" ? "off" : "on" }],
       ["native", p.nativeStyle === "design" ? "Leave Paseo's own items as Paseo draws them" : "Restyle Paseo's own items", "Paintbrush", { nativeStyle: p.nativeStyle === "design" ? "paseo" : "design" }],
     ];
@@ -243,6 +257,7 @@ export default function contribute(client: PluginClientContext) {
     removeTransformers();
     unpaintSidebar();
     unclamp();
+    unselect();
     unsubscribeProviders();
     unrestyle();
     unbindTheme();

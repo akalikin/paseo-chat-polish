@@ -21,9 +21,22 @@ export interface Run {
   open: boolean;
 }
 
-/** The id a step has both in the app and in the daemon's timeline: tool calls by callId, thoughts (which carry none) by their opening words. */
+const toolName = (item: Extract<Item, { type: "tool_call" }>) => item.name.trim().replace(/[.\s-]+/g, "_").toLowerCase();
+// What the app does before any plugin sees a call: these become its todo list (so they end a run like other items)...
+const TODO_TOOLS = new Set(["todowrite", "todo_write", "update_plan"]);
+// ...and Claude's task tools are dropped outright. The daemon timeline still has them, so a run must pass over them, or a run
+// headed by one would never render (its head is never transformed while the rest are removed).
+const DROPPED_TOOLS = new Set(["taskcreate", "taskupdate", "tasklist"]);
+export const droppedByApp = (item: Item) => item.type === "tool_call" && DROPPED_TOOLS.has(toolName(item));
+
+/** The id a step has both in the app and in the daemon's timeline: tool calls by callId, thoughts (which carry none) by their opening words.
+ * Plans, todo-list calls and agent messages aren't steps: they stand on their own. */
 export function stepKey(item: Item): string | undefined {
-  if (item.type === "tool_call") return item.detail.type === "plan" ? undefined : `t:${item.callId}`;
+  if (item.type === "tool_call") {
+    const name = toolName(item);
+    if (item.detail.type === "plan" || TODO_TOOLS.has(name) || name === "agent_message" || DROPPED_TOOLS.has(name)) return undefined;
+    return `t:${item.callId}`;
+  }
   if (item.type !== "reasoning") return undefined;
   const words = item.text.replace(/\s+/g, " ").trim().slice(0, 80);
   return words ? `r:${words}` : undefined;
@@ -59,6 +72,7 @@ export function stepRuns(list: readonly Entry[], skip: (item: Item) => boolean):
     run = [];
   };
   for (const [i, { item, at }] of list.entries()) {
+    if (droppedByApp(item)) continue;
     if (!stepKey(item)) {
       close();
       continue;
@@ -116,7 +130,7 @@ const places = new Map<string, { head: string; index: number }>();
 /** The app's own copy of each step (with its phase), newer than the daemon's while it streams. */
 const seen = new Map<string, { item: Item; phase: Phase }>();
 /** What the transformer last made of each step, to tell when Paseo must transform again. */
-const made = new Map<string, "plain" | "head" | "none">();
+const made = new Map<string, "head" | "none">();
 // ponytail: seen keeps the latest few thousand steps across agents; key it per agent if long sessions show stale rows.
 const SEEN_MAX = 4000;
 
@@ -125,6 +139,7 @@ const versions = new Map<string, number>();
 const dirty = new Set<string>();
 let flushQueued = false;
 let onStale: () => void = () => {};
+let onUnplaced: () => void = () => {};
 let skip: (item: Item) => boolean = () => false;
 
 /** Steps the transformer hides (prefs) are left out of runs; re-splits every agent when that changes. */
@@ -174,22 +189,20 @@ function rebuild(agentId: string) {
   if (keys.some(stale)) onStale();
 }
 
-/** A step the transformer made differently than it would now; a lone step made plain is fine until its run grows. */
+/** A step the transformer made differently than it would now. Only a step made before its run was known and that turned out not to
+ * lead it: a step not placed yet is made a head of its own, which renders as itself and grows into the merged row in place. */
 function stale(key: string) {
   const was = made.get(key);
-  const now = expected(key);
-  if (!was || was === now) return false;
-  return !(was === "plain" && now === "head" && (runs.get(key)?.steps.length ?? 1) === 1);
+  return !!was && was !== expected(key);
 }
 
 function expected(key: string) {
-  const place = places.get(key);
-  if (!place) return "plain";
-  return place.index > 0 ? "none" : "head";
+  return (places.get(key)?.index ?? 0) > 0 ? "none" : "head";
 }
 
-/** Called by the transformer for every step: "head" (render the merged row), "none" (leave it out) or "plain" (unknown, render alone). */
-export function placeStep(item: Item, phase: Phase): { key: string; as: "plain" | "head" | "none" } | undefined {
+/** Called by the transformer for every step: "head" (render the merged row) or "none" (leave it out). A step the followed timelines don't
+ * have yet (a tab just opened, the subscription a beat behind) leads a run of one until they catch up. */
+export function placeStep(item: Item, phase: Phase): { key: string; as: "head" | "none" } | undefined {
   const key = stepKey(item);
   if (!key) return undefined;
   seen.delete(key);
@@ -198,7 +211,8 @@ export function placeStep(item: Item, phase: Phase): { key: string; as: "plain" 
   const as = expected(key);
   made.set(key, as);
   const place = places.get(key);
-  if (place) touch(place.head);
+  if (!place) onUnplaced();
+  touch(place?.head ?? key);
   return { key, as };
 }
 
@@ -246,6 +260,8 @@ export function followAgent(paseo: PluginClientContext["paseo"], agentId: string
 /** After a fresh transform everything is made again. */
 export const resetMade = () => made.clear();
 export const onStaleSteps = (fn: () => void) => void (onStale = fn);
+/** A step came before its agent's timeline was followed or caught up; lets the entry follow newly opened tabs right away. */
+export const onUnplacedStep = (fn: () => void) => void (onUnplaced = fn);
 
 /** A run's steps as the app last saw them and its duration; a single step when the head isn't known (yet). */
 export function runOf(head: string): { steps: Array<{ item: Item; phase: Phase }>; ms?: number; open?: boolean } {

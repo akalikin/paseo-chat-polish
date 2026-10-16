@@ -93,6 +93,62 @@ export function errorText(error: unknown) {
 
 const tense = (running: boolean, now: string, past: string) => (running ? now : past);
 
+/** "AskUserQuestion", "create_agent" → "Ask user question", "Create agent". */
+export const readable = (name: string) => {
+  const words = name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[._\s-]+/g, " ").trim().toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+};
+// Paseo's own tools by what they act on, first match wins: browser_reload → AppWindow.
+const PASEO_ICONS: Array<[RegExp, string]> = [
+  [/^browser_/, "AppWindow"],
+  [/terminal/, "SquareTerminal"],
+  [/schedule|heartbeat/, "CalendarClock"],
+  [/workspace/, "FolderGit2"],
+  [/permission/, "ShieldCheck"],
+  [/provider|model|profile/, "Cpu"],
+  [/agent|user_input/, "Bot"],
+];
+/** An MCP tool, "mcp__github__create_issue" (Claude) or "github.create_issue" (Codex), with its icon. Paseo's own server goes unnamed. */
+export function mcpTool(name: string) {
+  const m = /^mcp__(.+?)__(.+)$/.exec(name) ?? /^([\w-]+)\.([\w.-]+)$/.exec(name);
+  if (!m) return undefined;
+  const leaf = m[2]!.toLowerCase();
+  if (!/^paseo/i.test(m[1]!)) return { server: m[1]!, tool: readable(m[2]!), icon: "Blocks" };
+  return { server: undefined, tool: readable(m[2]!), icon: PASEO_ICONS.find(([re]) => re.test(leaf))?.[1] ?? "Blocks" };
+}
+// Built-in tools that reach the client without a typed detail: icon, verb while running, verb once done. Keyed by name without separators.
+const NAMED: Record<string, [string, string, string]> = {
+  askuserquestion: ["MessageCircleQuestion", "Asking", "Asked"],
+  question: ["MessageCircleQuestion", "Asking", "Asked"],
+  requestuserinput: ["MessageCircleQuestion", "Asking", "Asked"],
+  toolsearch: ["Search", "Finding tools", "Found tools"],
+  notebookedit: ["Pencil", "Editing notebook", "Edited notebook"],
+  bashoutput: ["SquareTerminal", "Reading output", "Read output"],
+  taskoutput: ["SquareTerminal", "Reading output", "Read output"],
+  killshell: ["Square", "Stopping", "Stopped"],
+  taskstop: ["Square", "Stopping", "Stopped"],
+  monitor: ["Activity", "Watching", "Watched"],
+  sendmessage: ["Send", "Sending message", "Sent message"],
+  lsp: ["Code", "Querying LSP", "Queried LSP"],
+  webfetch: ["Globe", "Fetching", "Fetched"],
+  list: ["FolderOpen", "Listing", "Listed"],
+  applypatch: ["Pencil", "Patching", "Patched"],
+  skill: ["Sparkles", "Using skill", "Used skill"],
+  task: ["Bot", "Starting agent", "Started agent"],
+  speak: ["MicVocal", "Speaking", "Spoke"],
+  terminal: ["SquareTerminal", "Running", "Ran"],
+  agentmessage: ["Bot", "Agent message", "Agent message"],
+};
+const named = (name: string) => NAMED[name.toLowerCase().replace(/[._\s-]+/g, "")];
+/** A short target from a tool's input: the string itself, or its description, query, command, URL or path. */
+function inputTarget(input: unknown) {
+  if (typeof input === "string") return firstLine(input) || undefined;
+  if (!input || typeof input !== "object") return undefined;
+  const o = input as Record<string, unknown>;
+  const v = [o.description, o.query, o.command, o.url, o.file_path, o.path, o.pattern, o.prompt].find((x) => typeof x === "string" && x.trim());
+  return typeof v === "string" ? firstLine(v) : undefined;
+}
+
 function describe(d: ToolCallDetail, name: string, running: boolean): Omit<ToolData, "status" | "error"> {
   switch (d.type) {
     case "shell":
@@ -152,7 +208,11 @@ function describe(d: ToolCallDetail, name: string, running: boolean): Omit<ToolD
         target: d.query,
         mono: !web,
         meta: meta || undefined,
-        detail: items.length ? { kind: "list", items: items.slice(0, 50) } : undefined,
+        detail: items.length
+          ? { kind: "list", items: items.slice(0, 50) }
+          : d.content || d.annotations?.length
+            ? { kind: "text", text: clipLines(d.content ?? d.annotations!.join("\n")) }
+            : undefined,
       };
     }
     case "fetch":
@@ -199,25 +259,34 @@ function describe(d: ToolCallDetail, name: string, running: boolean): Omit<ToolD
             : undefined,
       };
     }
-    case "plain_text":
-      return {
-        icon: d.icon ? pascal(d.icon) : "Wrench",
-        verb: d.label ?? name,
-        mono: false,
-        detail: d.text ? { kind: "text", text: clipLines(d.text) } : undefined,
-      };
+    case "plain_text": {
+      const text = d.text ? { kind: "text" as const, text: clipLines(d.text) } : undefined;
+      const known = named(name);
+      // The label is the subject (a skill's name, a command, an ACP title), never the verb.
+      const target = d.label && d.label !== name ? firstLine(d.label) : known && d.text ? firstLine(d.text) : undefined;
+      if (known) {
+        const shell = /^terminal$/i.test(name);
+        return { icon: known[0], verb: tense(running, known[1], known[2]), target, shell, mono: shell, detail: text };
+      }
+      return { icon: d.icon ? pascal(d.icon) : "Wrench", verb: readable(name), target, mono: false, detail: text };
+    }
     case "plan":
-    case "unknown":
-      return {
-        icon: "Wrench",
-        verb: tense(running, "Calling", "Called"),
-        target: name,
-        mono: true,
-        detail:
-          d.type === "unknown" && (d.input != null || d.output != null)
-            ? { kind: "io", input: clipLines(stringify(d.input)), output: clipLines(stringify(d.output)) }
-            : undefined,
-      };
+    case "unknown": {
+      const io =
+        d.type === "unknown" && (d.input != null || d.output != null)
+          ? { kind: "io" as const, input: clipLines(stringify(d.input)), output: clipLines(stringify(d.output)) }
+          : undefined;
+      const input = d.type === "unknown" ? d.input : undefined;
+      const known = named(name);
+      if (known) {
+        // speak's input is the spoken text itself; its output is empty.
+        const speech = known[0] === "MicVocal";
+        return { icon: known[0], verb: tense(running, known[1], known[2]), target: inputTarget(input), mono: false, detail: speech ? undefined : io };
+      }
+      const mcp = mcpTool(name);
+      if (mcp) return { icon: mcp.icon, verb: tense(running, "Calling", "Called"), target: mcp.server ? `${mcp.server} › ${mcp.tool}` : mcp.tool, mono: false, detail: io };
+      return { icon: "Wrench", verb: tense(running, "Calling", "Called"), target: readable(name), mono: false, detail: io };
+    }
   }
 }
 

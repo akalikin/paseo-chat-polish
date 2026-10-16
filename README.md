@@ -37,6 +37,10 @@ paseo plugin install paseo-chat-polish
 
 Or straight from GitHub: `paseo plugin install https://github.com/lthieu96/paseo-chat-polish`.
 
+## Update
+
+When a newer commit (GitHub install) or version (registry or npm) is out, the dashboard sidebar shows **Update available**. Press **Update** and Paseo installs it and restarts the plugin. From a terminal: `paseo plugin update paseo-chat-polish`. A copy installed from a local folder only reloads.
+
 ## Limitations
 
 - Restyling Paseo's own items, the font settings and the app theme picker work on desktop and web only.

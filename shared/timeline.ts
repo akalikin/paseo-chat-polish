@@ -32,9 +32,13 @@ export const prefsSchema = z.object({
   hidden: z.array(z.enum(HIDEABLE)).default([]),
   /** Long user messages: clamped to six lines with a fade (desktop), or shown in full. */
   userMessages: z.enum(["clamp", "full"]).default("clamp"),
-  /** Thought and tool rows: faded until hovered or opened, or full strength. An old "merged" value (it hid items inside Paseo's
-   * virtualized list and crashed it) falls back to faded; merging is now `merge`, which removes items instead. */
-  steps: z.enum(["faded", "full"]).catch("faded"),
+  /** Thought and tool rows: faded (dim 30%, faded 45%, soft 65%) until hovered or opened, or full strength. An old "merged" value
+   * (it hid items inside Paseo's virtualized list and crashed it) falls back to faded; merging is now `merge`, which removes items instead. */
+  steps: z.enum(["dim", "faded", "soft", "full"]).catch("faded"),
+  /** The "Copy  Text  Markdown" popup over text selected in a reply (desktop and web). */
+  selectionCopy: z.enum(["on", "off"]).default("on"),
+  /** Space between replies, prompts and step rows, for Paseo's items (web.ts) and the plugin's rows (views.tsx). */
+  density: z.enum(["compact", "normal", "spacious"]).default("normal"),
   /** The icon at the start of merged, tool call and thought rows, per kind; hidden, a failed row's verb turns red instead.
    * An older single "show" or "hide" applies to all three. */
   rowIcons: z.preprocess(

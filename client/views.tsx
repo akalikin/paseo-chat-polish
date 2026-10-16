@@ -1,8 +1,8 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useAgent, useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
-import { Icon, Modal, ScrollView, useRevealedText } from "@getpaseo/plugin/client/react-native";
+import { Icon, ScrollView, useRevealedText } from "@getpaseo/plugin/client/react-native";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { AccessibilityInfo, Animated, Easing, Image, LayoutAnimation, Platform, Pressable, StyleSheet, Text, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
+import { AccessibilityInfo, Animated, Easing, Image, LayoutAnimation, Modal, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import type { z } from "zod";
 import { readImage } from "../shared/image";
@@ -28,11 +28,12 @@ const ICON_SLOT = 20;
  */
 export const PMONO = { dataSet: { pmono: "" } } as object;
 const INDENT = 28;
-// Paseo puts 16pt between timeline items; rows are 26pt tall, so 6pt less gives the design's 36pt pitch. It comes off the top:
-// a reply block before a row keeps 12pt of bottom padding, so rows sat 12pt nearer the text below than the text above.
-const TIGHT = { marginTop: -9, marginBottom: 3 };
-/** How far faded thought and tool rows step back (Paseo's own rows match it in web.ts). */
-const QUIET = 0.45;
+// Paseo puts 16pt between timeline items; rows are 26pt tall, so 6pt less gives the design's 36pt pitch (normal density). The split puts a row
+// 20pt from reply text on both sides, with the tighter reply blocks in web.ts (6pt item gap, 4pt padding).
+// Compact and spacious move rows 6pt closer or 8pt further apart; web.ts sets the same values for Paseo's rows.
+const TIGHT = { compact: { marginTop: 0, marginBottom: -12 }, normal: { marginTop: 2, marginBottom: -8 }, spacious: { marginTop: 5, marginBottom: -3 } };
+/** How far faded thought and tool rows step back, per strength (Paseo's own rows match it in web.ts). */
+const QUIET = { dim: 0.3, faded: 0.45, soft: 0.65, full: 1 };
 
 function toneColor(c: Colors, tone: Tone | undefined) {
   if (tone === "success") return c.statusSuccess;
@@ -279,7 +280,7 @@ function Row(p: RowProps) {
       accessibilityRole={p.onToggle ? "button" : undefined}
       accessibilityState={p.onToggle ? { expanded: !!p.open } : undefined}
       // Bleeds into the gutter so the hover surface (full-strength rows only; faded rows brighten instead) covers the same area as Paseo's own tool rows.
-      style={[s.row, { marginHorizontal: -13, paddingHorizontal: 13, borderRadius: 6 }, hovered && p.onToggle && steps === "full" ? { backgroundColor: c.surface1 } : null, quiet && { opacity: QUIET }]}
+      style={[s.row, { marginHorizontal: -13, paddingHorizontal: 13, borderRadius: 6 }, hovered && p.onToggle && steps === "full" ? { backgroundColor: c.surface1 } : null, quiet && { opacity: QUIET[steps] }]}
     >
       {bare ? null : (
         <View style={s.slot}>
@@ -441,10 +442,13 @@ function ToolDetail({ data, theme }: { data: NonNullable<ToolData["detail"]>; th
   }
 }
 
-export function ToolItem({ item, theme, layout }: PluginTimelineItemProps<ToolData>) {
+/** Rows inside an open merged run sit flush in its list, without the timeline spacing TIGHT adds. */
+type Nestable = { nested?: boolean };
+
+export function ToolItem({ item, theme, layout, nested }: PluginTimelineItemProps<ToolData> & Nestable) {
   const d = item.data;
   const s = useStyles(theme);
-  const { toolDetails } = usePrefs();
+  const { toolDetails, density } = usePrefs();
   const auto = !!d.detail && (toolDetails === "expanded" || (toolDetails === "failed" && d.status === "failed"));
   const [open, toggle, setOpen] = useDisclosure(auto);
   // A running call that fails opens once it fails.
@@ -455,7 +459,7 @@ export function ToolItem({ item, theme, layout }: PluginTimelineItemProps<ToolDa
   const indent = useIndent("tool");
   const c = theme.colors;
   return (
-    <Animated.View style={[TIGHT, enter, d.status === "canceled" ? { opacity: 0.55 } : null]}>
+    <Animated.View style={[nested ? null : TIGHT[density], enter, d.status === "canceled" ? { opacity: 0.55 } : null]}>
       <Row
         theme={theme}
         compact={layout.compact}
@@ -511,11 +515,13 @@ export function MergedSteps(
   const { item, theme, layout, steps, ms, growing, defaultOpen } = props;
   const [open, toggle] = useDisclosure(!!defaultOpen);
   const icons = !!useIndent("steps");
-  const step = ({ item: step, phase }: (typeof steps)[number]) =>
+  const { density } = usePrefs();
+  // Inside the open list steps sit flush; a run of one stands in the timeline like any row.
+  const step = ({ item: step, phase }: (typeof steps)[number], nested = true) =>
     step.type === "tool_call" ? (
-      <ToolItem key={stepKey(step)} {...props} item={{ ...item, data: toolData(step) }} />
+      <ToolItem key={stepKey(step)} {...props} nested={nested} item={{ ...item, data: toolData(step) }} />
     ) : step.type === "reasoning" ? (
-      <ThoughtItem key={stepKey(step)} {...props} item={{ ...item, data: { text: step.text, phase } }} />
+      <ThoughtItem key={stepKey(step)} {...props} nested={nested} item={{ ...item, data: { text: step.text, phase } }} />
     ) : null;
   // The step in progress, or between steps of a run the agent is still adding to, the one just done (not the summary, which would flash).
   const live = steps.findLast((s) => s.phase === "streaming" || (s.item.type === "tool_call" && s.item.status === "running")) ?? (growing ? steps.at(-1) : undefined);
@@ -525,11 +531,11 @@ export function MergedSteps(
     : { verb: stepSummary(steps.map((s) => s.item)) };
   const holdLabel = !!live && !(live.item.type === "tool_call" && (live.item.status === "failed" || live.item.status === "canceled"));
   const label = useSteady(fresh, `${fresh.verb}\n${fresh.target ?? ""}`, 700, holdLabel);
-  if (steps.length < 2) return steps[0] ? step(steps[0]) : null;
+  if (steps.length < 2) return steps[0] ? step(steps[0], false) : null;
   const c = theme.colors;
   const failed = steps.filter((s) => s.item.type === "tool_call" && s.item.status === "failed").length;
   return (
-    <View style={TIGHT}>
+    <View style={TIGHT[density]}>
       <Row
         theme={theme}
         compact={layout.compact}
@@ -548,23 +554,23 @@ export function MergedSteps(
         onToggle={toggle}
       />
       {open ? (
-        <FadeIn style={{ marginLeft: icons ? 9 : 0, paddingLeft: icons ? 15 : 13, paddingTop: 12, gap: 6, borderLeftWidth: 1, borderLeftColor: alpha(c.border, 0.6) }}>{steps.map(step)}</FadeIn>
+        <FadeIn style={{ marginLeft: icons ? 9 : 0, paddingLeft: icons ? 15 : 13, paddingTop: 3, paddingBottom: 3, borderLeftWidth: 1, borderLeftColor: alpha(c.border, 0.6) }}>{steps.map((s) => step(s))}</FadeIn>
       ) : null}
     </View>
   );
 }
 
-export function ThoughtItem({ item, theme, layout }: PluginTimelineItemProps<z.output<typeof thoughtSchema>>) {
+export function ThoughtItem({ item, theme, layout, nested }: PluginTimelineItemProps<z.output<typeof thoughtSchema>> & Nestable) {
   const s = useStyles(theme);
   // "paseo" follows Settings → Appearance → Always expand reasoning, which is off (collapsed) by default.
-  const { reasoning } = usePrefs();
+  const { reasoning, density } = usePrefs();
   const [open, toggle] = useDisclosure(reasoning === "paseo" ? readHostAppearance().autoExpandReasoning : reasoning === "expanded");
   const streaming = item.data.phase === "streaming";
   const enter = useEnter(streaming);
   const text = useRevealedText(item.data.text, item.data.phase);
   const inset = useIndent("thought") ? 9 : 0;
   return (
-    <Animated.View style={[TIGHT, enter]}>
+    <Animated.View style={[nested ? null : TIGHT[density], enter]}>
       <Row
         theme={theme}
         compact={layout.compact}
@@ -731,16 +737,11 @@ function useImage(url: string) {
 
 const THUMB = { small: { width: 200, height: 128 }, large: { width: 320, height: 200 } };
 
-function Thumbnail({ alt, url, theme }: { alt: string; url: string; theme: PluginTheme }) {
+function Thumbnail({ alt, url, theme, onOpen }: { alt: string; url: string; theme: PluginTheme; onOpen(): void }) {
   const s = useStyles(theme);
   const c = theme.colors;
   const { uri, failed } = useImage(url);
   const size = THUMB[usePrefs().images === "large" ? "large" : "small"];
-  const [open, setOpen] = useState(false);
-  const [ratio, setRatio] = useState(16 / 10);
-  useEffect(() => {
-    if (uri) Image.getSize(uri, (w, h) => h && setRatio(w / h), () => {});
-  }, [uri]);
   const frame = [size, { borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, backgroundColor: c.surface1, overflow: "hidden" as const }];
   if (!uri) {
     return (
@@ -751,26 +752,129 @@ function Thumbnail({ alt, url, theme }: { alt: string; url: string; theme: Plugi
     );
   }
   return (
-    <>
-      <Pressable accessibilityRole="imagebutton" accessibilityLabel={`Open ${alt}`} onPress={() => setOpen(true)} style={frame}>
-        <Image source={{ uri }} style={size} resizeMode="cover" />
-      </Pressable>
-      <Modal title={alt} open={open} onOpenChange={setOpen}>
-        <Modal.Content>
-          <Image source={{ uri }} style={{ width: "100%", aspectRatio: ratio, borderRadius: 8 }} resizeMode="contain" />
-        </Modal.Content>
-      </Modal>
-    </>
+    <Pressable accessibilityRole="imagebutton" accessibilityLabel={`Open ${alt}`} onPress={onOpen} style={frame}>
+      <Image source={{ uri }} style={size} resizeMode="cover" />
+    </Pressable>
+  );
+}
+
+type KeyTarget = { addEventListener(type: "keydown", l: (e: { key: string; preventDefault(): void }) => void): void; removeEventListener(type: "keydown", l: (e: { key: string; preventDefault(): void }) => void): void };
+
+/** A round control on the lightbox's dark chrome, the same in every theme. */
+function LightboxButton({ icon, label, onPress, size = 32 }: { icon: string; label: string; onPress(): void; size?: number }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      onPress={onPress}
+      style={({ hovered, pressed }: { hovered?: boolean; pressed: boolean }) => ({ width: size, height: size, borderRadius: 999, alignItems: "center", justifyContent: "center", backgroundColor: `rgba(255,255,255,${pressed ? 0.2 : hovered ? 0.14 : 0.08})` })}
+    >
+      <Icon name={icon} size={size > 32 ? 18 : 16} color="#ffffff" />
+    </Pressable>
+  );
+}
+
+/**
+ * Full-window viewer for a reply's images: fitted to the window, click (or Z) for actual size with scrolling, arrows between
+ * images, Esc or a click on the backdrop to close.
+ */
+function Lightbox({ images, index, onIndex, onClose }: { images: Array<{ alt: string; url: string }>; index: number; onIndex(i: number): void; onClose(): void }) {
+  const image = images[index]!;
+  const { uri, failed } = useImage(image.url);
+  const win = useWindowDimensions();
+  const [natural, setNatural] = useState<{ w: number; h: number }>();
+  const [zoomed, setZoomed] = useState(false);
+  const many = images.length > 1;
+  const go = useCallback((step: number) => (setZoomed(false), onIndex((index + step + images.length) % images.length)), [index, images.length, onIndex]);
+  useEffect(() => {
+    setNatural(undefined);
+    if (uri) Image.getSize(uri, (w, h) => setNatural({ w, h }), () => {});
+  }, [uri]);
+  useEffect(() => {
+    const target = Platform.OS === "web" ? (globalThis as unknown as KeyTarget) : undefined;
+    if (!target) return;
+    const onKey = (e: { key: string; preventDefault(): void }) => {
+      if (e.key === "Escape") onClose();
+      else if (e.key === "ArrowRight" && many) go(1);
+      else if (e.key === "ArrowLeft" && many) go(-1);
+      else if (e.key === "z" || e.key === "Z") setZoomed((z) => !z);
+      else return;
+      e.preventDefault();
+    };
+    target.addEventListener("keydown", onKey);
+    return () => target.removeEventListener("keydown", onKey);
+  }, [go, many, onClose]);
+  // Fitted: the largest size that leaves room for the chrome, never above actual size except that a tiny image grows to 320pt.
+  // Zoomed: actual size, or twice the fitted size for an image already shown whole, so a click always magnifies.
+  const room = { w: win.width - (many ? 160 : 64), h: win.height - 136 };
+  const fit = natural ? Math.min(Math.max(1, 320 / Math.max(natural.w, natural.h)), room.w / natural.w, room.h / natural.h) : 1;
+  const scale = zoomed ? Math.max(1, fit * 2) : fit;
+  const shown = natural ? { width: Math.round(natural.w * scale), height: Math.round(natural.h * scale) } : { width: Math.min(room.w, 640), height: Math.min(room.h, 400) };
+  const chrome = { color: "#ffffff", fontSize: 13 } as const;
+  return (
+    <Modal transparent visible animationType="fade" onRequestClose={onClose}>
+      <View style={[{ flex: 1, backgroundColor: "rgba(8,9,11,0.92)" }, Platform.OS === "web" ? ({ backdropFilter: "blur(12px)" } as object) : null]}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Close image" onPress={onClose} style={StyleSheet.absoluteFill} />
+        <View pointerEvents="box-none" style={{ flexDirection: "row", alignItems: "center", gap: 12, height: 56, paddingHorizontal: 16 }}>
+          <View pointerEvents="none" style={{ flex: 1, flexDirection: "row", alignItems: "baseline", gap: 10, minWidth: 0 }}>
+            <Text style={[chrome, { fontWeight: "500", flexShrink: 1 }]} numberOfLines={1}>
+              {image.alt || "Image"}
+            </Text>
+            {natural ? <Text style={[chrome, { fontSize: 12, opacity: 0.55, fontVariant: ["tabular-nums"] }]}>{`${natural.w} × ${natural.h}`}</Text> : null}
+            {many ? <Text style={[chrome, { fontSize: 12, opacity: 0.55, fontVariant: ["tabular-nums"] }]}>{`${index + 1} / ${images.length}`}</Text> : null}
+          </View>
+          {natural && fit < 1 ? <Text style={[chrome, { fontSize: 12, opacity: 0.55, fontVariant: ["tabular-nums"] }]}>{`${Math.round(scale * 100)}%`}</Text> : null}
+          <LightboxButton icon={zoomed ? "ZoomOut" : "ZoomIn"} label={zoomed ? "Fit to window" : "Zoom in"} onPress={() => setZoomed((z) => !z)} />
+          <LightboxButton icon="X" label="Close" onPress={onClose} />
+        </View>
+        <ScrollView style={{ flex: 1 }} horizontal={false} contentContainerStyle={{ flexGrow: 1 }}>
+          <ScrollView horizontal contentContainerStyle={{ flexGrow: 1 }}>
+            {/* The scroll area covers the backdrop, so it closes on a press itself; the image's own press zooms instead. */}
+            <Pressable
+              accessibilityLabel="Close image"
+              onPress={onClose}
+              style={{ flexGrow: 1, minWidth: win.width, minHeight: win.height - 56, alignItems: "center", justifyContent: "center", paddingHorizontal: many ? 80 : 32, paddingBottom: 56, cursor: "default" } as object}
+            >
+            {uri ? (
+              <Pressable accessibilityRole="imagebutton" accessibilityLabel={zoomed ? "Fit to window" : "Zoom in"} onPress={() => setZoomed((z) => !z)} style={{ cursor: zoomed ? "zoom-out" : "zoom-in" } as object}>
+                <Image source={{ uri }} style={[shown, { borderRadius: 6 }]} resizeMode="contain" />
+              </Pressable>
+            ) : (
+              <View pointerEvents="none" style={[shown, { alignItems: "center", justifyContent: "center", gap: 8 }]}>
+                <Icon name={failed ? "ImageOff" : "Image"} size={20} color="rgba(255,255,255,0.5)" />
+                <Text style={[chrome, { opacity: 0.5 }]}>{failed ? "Image unavailable" : "Loading…"}</Text>
+              </View>
+            )}
+            </Pressable>
+          </ScrollView>
+        </ScrollView>
+        {many ? (
+          <>
+            <View pointerEvents="box-none" style={{ position: "absolute", left: 20, top: 0, bottom: 0, justifyContent: "center" }}>
+              <LightboxButton icon="ChevronLeft" label="Previous image" onPress={() => go(-1)} size={40} />
+            </View>
+            <View pointerEvents="box-none" style={{ position: "absolute", right: 20, top: 0, bottom: 0, justifyContent: "center" }}>
+              <LightboxButton icon="ChevronRight" label="Next image" onPress={() => go(1)} size={40} />
+            </View>
+          </>
+        ) : null}
+        <Text pointerEvents="none" style={[chrome, { position: "absolute", bottom: 14, alignSelf: "center", fontSize: 12, color: "rgba(255,255,255,0.6)", backgroundColor: "rgba(8,9,11,0.7)", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, overflow: "hidden" }]}>
+          {Platform.OS === "web" ? `Click to ${zoomed ? "fit" : "zoom"} · ${many ? "← → to browse · " : ""}Esc to close` : "Tap to zoom"}
+        </Text>
+      </View>
+    </Modal>
   );
 }
 
 export function ImagesItem({ item, theme }: PluginTimelineItemProps<z.output<typeof imagesSchema>>) {
+  const [open, setOpen] = useState<number>();
   return (
-    // Rows come 9pt up and leave 3pt below (TIGHT), so thumbnails between two rows keep the room below: 19pt each side.
-    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, paddingBottom: 12 }}>
+    // Rows leave 8pt less below and take 2pt more above (TIGHT), so thumbnails between two rows sit 19pt from each.
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 11, paddingBottom: 1 }}>
       {item.data.images.map((img, i) => (
-        <Thumbnail key={i} alt={img.alt} url={img.url} theme={theme} />
+        <Thumbnail key={i} alt={img.alt} url={img.url} theme={theme} onOpen={() => setOpen(i)} />
       ))}
+      {open !== undefined ? <Lightbox images={item.data.images} index={open} onIndex={setOpen} onClose={() => setOpen(undefined)} /> : null}
     </View>
   );
 }
